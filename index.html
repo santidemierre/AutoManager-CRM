@@ -1,0 +1,1370 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoManager CRM - Gestión de Ventas</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, onAuthStateChanged, signInWithCustomToken, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, where, getDocs, writeBatch, setDoc, arrayUnion } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Configuración e Inicialización ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'auto-manager-crm';
+        const FALLBACK_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyDIhcqpvmTbK4oXp7yhF1eJts2PUNtzjcs",
+            authDomain: "automanager-crm.firebaseapp.com",
+            projectId: "automanager-crm",
+            storageBucket: "automanager-crm.firebasestorage.app",
+            messagingSenderId: "942741288564",
+            appId: "1:942741288564:web:83f7192c77bca3129b8321"
+        };
+
+        let firebaseConfig = {};
+        try {
+            if (window.__firebase_config) {
+                firebaseConfig = JSON.parse(window.__firebase_config);
+            } else {
+                firebaseConfig = FALLBACK_FIREBASE_CONFIG;
+            }
+        } catch {
+            firebaseConfig = FALLBACK_FIREBASE_CONFIG;
+        }
+
+        let firebaseEnabled = false;
+        let app = null;
+        let auth = null;
+        let db = null;
+
+        try {
+            if (firebaseConfig && firebaseConfig.apiKey) {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                firebaseEnabled = true;
+            } else {
+                console.warn('Firebase no configurado (faltan variables de hosting). Ejecutando en modo local con localStorage.');
+            }
+        } catch (error) {
+            console.error('Firebase init error. Ejecutando en modo local con localStorage.', error);
+            firebaseEnabled = false;
+            app = null;
+            auth = null;
+            db = null;
+        }
+
+        // --- Estado Global ---
+        let currentUser = null;
+        let activeView = 'board';
+        let deals = [];
+        let transactions = [];
+        let uiSettings = {
+            boardTitle: 'Pipeline de Operaciones',
+            boardSubtitle: 'Gestiona el progreso de tus ventas activas.',
+            stageLabels: {},
+            stages: null
+        };
+        window.detailDealId = null;
+        window.stageDraft = null;
+        let unsubscribers = [];
+
+        // --- Persistencia Local (fallback) ---
+        const LOCAL_UID = 'local';
+        const localKey = (suffix) => `amcrm:${appId}:${suffix}`;
+
+        function safeJsonParse(val, fallback) {
+            try {
+                return JSON.parse(val);
+            } catch {
+                return fallback;
+            }
+        }
+
+        function loadLocalState() {
+            deals = safeJsonParse(localStorage.getItem(localKey('deals')) || '[]', []);
+            transactions = safeJsonParse(localStorage.getItem(localKey('transactions')) || '[]', []);
+            const storedUi = safeJsonParse(localStorage.getItem(localKey('uiSettings')) || '{}', {});
+            uiSettings = {
+                ...uiSettings,
+                ...(typeof storedUi.boardTitle === 'string' ? { boardTitle: storedUi.boardTitle } : {}),
+                ...(typeof storedUi.boardSubtitle === 'string' ? { boardSubtitle: storedUi.boardSubtitle } : {}),
+                ...(storedUi.stageLabels && typeof storedUi.stageLabels === 'object' ? { stageLabels: storedUi.stageLabels } : {}),
+                ...(Array.isArray(storedUi.stages) ? { stages: storedUi.stages } : {})
+            };
+        }
+
+        function saveLocalState() {
+            localStorage.setItem(localKey('deals'), JSON.stringify(deals));
+            localStorage.setItem(localKey('transactions'), JSON.stringify(transactions));
+            localStorage.setItem(localKey('uiSettings'), JSON.stringify(uiSettings));
+        }
+
+        function makeId(prefix) {
+            if (typeof crypto !== 'undefined' && crypto.randomUUID) return `${prefix}_${crypto.randomUUID()}`;
+            return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+        }
+
+        function escapeHtml(str) {
+            return (str ?? '').toString()
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#39;');
+        }
+
+        // --- Referencias a Colecciones ---
+        const getDealsRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'deals');
+        const getTransRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'transactions');
+        const getUiSettingsRef = (uid) => doc(db, 'artifacts', appId, 'users', uid, 'settings', 'ui');
+
+        // --- UI Logic ---
+        const views = {
+            board: document.getElementById('view-board'),
+            clients: document.getElementById('view-clients'),
+            finances: document.getElementById('view-finances')
+        };
+
+        function switchView(viewName) {
+            activeView = viewName;
+            Object.keys(views).forEach(v => {
+                if(views[v]) views[v].classList.toggle('hidden', v !== viewName);
+            });
+            document.querySelectorAll('.nav-link').forEach(link => {
+                link.classList.toggle('bg-blue-700', link.dataset.view === viewName);
+            });
+            render();
+        }
+
+        // --- Auth Implementation ---
+        function setAuthUiState(user) {
+            const overlay = document.getElementById('auth-overlay');
+            const userLabel = document.getElementById('auth-user-label');
+            const logoutBtn = document.getElementById('auth-logout-btn');
+
+            if (!firebaseEnabled) {
+                overlay?.classList.add('hidden');
+                if (userLabel) userLabel.textContent = '';
+                logoutBtn?.classList.add('hidden');
+                return;
+            }
+
+            if (user) {
+                overlay?.classList.add('hidden');
+                if (userLabel) userLabel.textContent = user.email || '(sin email)';
+                logoutBtn?.classList.remove('hidden');
+            } else {
+                overlay?.classList.remove('hidden');
+                if (userLabel) userLabel.textContent = '';
+                logoutBtn?.classList.add('hidden');
+            }
+        }
+
+        function clearListeners() {
+            unsubscribers.forEach((u) => {
+                try { u(); } catch { /* no-op */ }
+            });
+            unsubscribers = [];
+        }
+
+        window.authLogin = async (e) => {
+            e?.preventDefault?.();
+            if (!firebaseEnabled || !auth) return;
+            const emailEl = document.getElementById('auth-email');
+            const passEl = document.getElementById('auth-password');
+            const email = (emailEl?.value || '').toString().trim();
+            const password = (passEl?.value || '').toString();
+            const msg = document.getElementById('auth-message');
+            if (msg) msg.textContent = '';
+
+            if (emailEl && !emailEl.checkValidity()) {
+                emailEl.reportValidity?.();
+                if (msg) msg.textContent = 'Ingresá un email válido.';
+                return;
+            }
+            if (!password) {
+                if (msg) msg.textContent = 'Ingresá tu contraseña.';
+                return;
+            }
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+            } catch (err) {
+                if (msg) msg.textContent = err?.message || 'Error de login';
+            }
+        };
+
+        window.authSignup = async () => {
+            if (!firebaseEnabled || !auth) return;
+            const emailEl = document.getElementById('auth-email');
+            const passEl = document.getElementById('auth-password');
+            const email = (emailEl?.value || '').toString().trim();
+            const password = (passEl?.value || '').toString();
+            const msg = document.getElementById('auth-message');
+            if (msg) msg.textContent = '';
+
+            if (emailEl && !emailEl.checkValidity()) {
+                emailEl.reportValidity?.();
+                if (msg) msg.textContent = 'Ingresá un email válido.';
+                return;
+            }
+            if (!password) {
+                if (msg) msg.textContent = 'Ingresá una contraseña.';
+                return;
+            }
+            if (password.length < 6) {
+                if (msg) msg.textContent = 'La contraseña debe tener al menos 6 caracteres.';
+                return;
+            }
+            try {
+                await createUserWithEmailAndPassword(auth, email, password);
+            } catch (err) {
+                if (msg) msg.textContent = err?.message || 'Error al crear cuenta';
+            }
+        };
+
+        window.authResetPassword = async () => {
+            if (!firebaseEnabled || !auth) return;
+            const emailEl = document.getElementById('auth-email');
+            const email = (emailEl?.value || '').toString().trim();
+            const msg = document.getElementById('auth-message');
+            if (msg) msg.textContent = '';
+            if (emailEl && !emailEl.checkValidity()) {
+                emailEl.reportValidity?.();
+                if (msg) msg.textContent = 'Ingresá un email válido para recuperar la contraseña.';
+                return;
+            }
+            try {
+                await sendPasswordResetEmail(auth, email);
+                if (msg) msg.textContent = 'Te enviamos un email para restablecer la contraseña.';
+            } catch (err) {
+                if (msg) msg.textContent = err?.message || 'Error al enviar email de recuperación';
+            }
+        };
+
+        window.authLogout = async () => {
+            if (!firebaseEnabled || !auth) return;
+            await signOut(auth);
+        };
+
+        if (firebaseEnabled && auth) {
+            onAuthStateChanged(auth, (user) => {
+                currentUser = user;
+                setAuthUiState(user);
+                if (user) setupListeners(user.uid);
+                else {
+                    clearListeners();
+                    deals = [];
+                    transactions = [];
+                    render();
+                }
+            });
+        }
+
+        // --- Firestore Listeners ---
+        function setupListeners(uid) {
+            clearListeners();
+            unsubscribers.push(onSnapshot(getDealsRef(uid), (snapshot) => {
+                deals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                render();
+            }, (err) => console.error("Deals Listener Error:", err)));
+
+            unsubscribers.push(onSnapshot(getTransRef(uid), (snapshot) => {
+                transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                render();
+            }, (err) => console.error("Trans Listener Error:", err)));
+
+            unsubscribers.push(onSnapshot(getUiSettingsRef(uid), (snapshot) => {
+                if (snapshot.exists()) {
+                    const data = snapshot.data() || {};
+                    uiSettings = {
+                        ...uiSettings,
+                        ...(typeof data.boardTitle === 'string' ? { boardTitle: data.boardTitle } : {}),
+                        ...(typeof data.boardSubtitle === 'string' ? { boardSubtitle: data.boardSubtitle } : {}),
+                        ...(data.stageLabels && typeof data.stageLabels === 'object' ? { stageLabels: data.stageLabels } : {}),
+                        ...(Array.isArray(data.stages) ? { stages: data.stages } : {})
+                    };
+                }
+                render();
+            }, (err) => console.error("UI Settings Listener Error:", err)));
+        }
+
+        // --- Acciones ---
+        window.saveDeal = async (e) => {
+            e.preventDefault();
+            if (!currentUser) return;
+            const formData = new FormData(e.target);
+            const dealId = (formData.get('dealId') || '').toString().trim();
+            const editableDealData = {
+                clientName: (formData.get('clientName') || '').toString().trim(),
+                clientEmail: (formData.get('clientEmail') || '').toString().trim(),
+                carModel: (formData.get('carModel') || '').toString().trim(),
+                carYear: (formData.get('carYear') || '').toString().trim(),
+                price: parseFloat(formData.get('price')) || 0,
+                location: (formData.get('location') || '').toString().trim(),
+                notes: (formData.get('notes') || '').toString().trim(),
+                reminder: (formData.get('reminder') || '').toString().trim(),
+                updatedAt: new Date().toISOString()
+            };
+
+            if (!firebaseEnabled) {
+                if (dealId) {
+                    const idx = deals.findIndex(d => d.id === dealId);
+                    if (idx >= 0) deals[idx] = { ...deals[idx], ...editableDealData };
+                } else {
+                    const firstStageId = (typeof getStages === 'function' ? (getStages()[0]?.id) : null) || 'visita_inicial';
+                    deals.unshift({
+                        id: makeId('deal'),
+                        ...editableDealData,
+                        status: firstStageId,
+                        stageNotes: [],
+                        createdAt: new Date().toISOString()
+                    });
+                }
+                saveLocalState();
+                render();
+            } else {
+                if (dealId) {
+                    await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', dealId), editableDealData);
+                } else {
+                    const firstStageId = (typeof getStages === 'function' ? (getStages()[0]?.id) : null) || 'visita_inicial';
+                    await addDoc(getDealsRef(currentUser.uid), {
+                        ...editableDealData,
+                        status: firstStageId,
+                        stageNotes: [],
+                        createdAt: new Date().toISOString()
+                    });
+                }
+            }
+            e.target.reset();
+            closeModal('deal-modal');
+        };
+
+        window.deleteDeal = async (dealId) => {
+            if (!currentUser) return;
+            const id = (dealId || '').toString().trim();
+            if (!id) return;
+            const ok = window.confirm('¿Eliminar esta operación y TODOS sus movimientos? Esta acción no se puede deshacer.');
+            if (!ok) return;
+
+            if (!firebaseEnabled) {
+                deals = deals.filter(d => d.id !== id);
+                transactions = transactions.filter(t => t.dealId !== id);
+                saveLocalState();
+                render();
+            } else {
+                const batch = writeBatch(db);
+                const dealDocRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', id);
+                batch.delete(dealDocRef);
+
+                const transQuery = query(getTransRef(currentUser.uid), where('dealId', '==', id));
+                const transSnap = await getDocs(transQuery);
+                transSnap.forEach((t) => {
+                    batch.delete(t.ref);
+                });
+
+                await batch.commit();
+            }
+            closeModal('detail-modal');
+        };
+
+        window.addStageNote = async (dealId) => {
+            if (!currentUser) return;
+            const id = (dealId || '').toString().trim();
+            if (!id) return;
+            const deal = deals.find(d => d.id === id);
+            if (!deal) return;
+
+            const input = document.getElementById('stage-note-input');
+            const text = (input?.value || '').toString().trim();
+            if (!text) return;
+
+            const note = {
+                id: makeId('note'),
+                stageId: deal.status,
+                text,
+                createdAt: new Date().toISOString()
+            };
+
+            if (!firebaseEnabled) {
+                const idx = deals.findIndex(d => d.id === id);
+                if (idx >= 0) {
+                    const existing = Array.isArray(deals[idx].stageNotes) ? deals[idx].stageNotes : [];
+                    deals[idx] = { ...deals[idx], stageNotes: [note, ...existing], updatedAt: new Date().toISOString() };
+                }
+                saveLocalState();
+                if (input) input.value = '';
+                window.openDealDetails(id);
+                render();
+            } else {
+                await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', id), {
+                    stageNotes: arrayUnion(note),
+                    updatedAt: new Date().toISOString()
+                });
+                if (input) input.value = '';
+                window.openDealDetails(id);
+            }
+        };
+
+        window.updateStatus = async (id, newStatus) => {
+            if (!currentUser) return;
+            if (!firebaseEnabled) {
+                const idx = deals.findIndex(d => d.id === id);
+                if (idx >= 0) deals[idx] = { ...deals[idx], status: newStatus, updatedAt: new Date().toISOString() };
+                saveLocalState();
+                render();
+            } else {
+                await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', id), {
+                    status: newStatus
+                });
+            }
+        };
+
+        // --- Drag & Drop (Kanban) ---
+        window.isDragging = false;
+        window.draggingDealId = null;
+
+        window.onDragStartDeal = (e, dealId) => {
+            window.isDragging = true;
+            window.draggingDealId = dealId;
+            try {
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/plain', dealId);
+            } catch {
+                // no-op
+            }
+        };
+
+        window.onDragEndDeal = () => {
+            // Slight delay so a click isn't triggered right after drop
+            setTimeout(() => {
+                window.isDragging = false;
+                window.draggingDealId = null;
+            }, 0);
+            document.querySelectorAll('[data-dropzone="1"]').forEach(el => {
+                el.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
+            });
+        };
+
+        window.onDragOverStage = (e) => {
+            e.preventDefault();
+            if (!e.currentTarget) return;
+            e.currentTarget.classList.add('ring-2', 'ring-blue-400', 'bg-blue-50');
+        };
+
+        window.onDragLeaveStage = (e) => {
+            if (!e.currentTarget) return;
+            e.currentTarget.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
+        };
+
+        window.onDropDealToStage = async (e, stageId) => {
+            e.preventDefault();
+            const target = e.currentTarget;
+            if (target) target.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
+
+            let dealId = '';
+            try {
+                dealId = (e.dataTransfer.getData('text/plain') || '').toString();
+            } catch {
+                dealId = (window.draggingDealId || '').toString();
+            }
+            dealId = dealId.trim();
+            if (!dealId) return;
+            if (!stageId) return;
+            await window.updateStatus(dealId, stageId);
+        };
+
+        window.addTransaction = async (e) => {
+            e.preventDefault();
+            if (!currentUser) return;
+            const formData = new FormData(e.target);
+            const transId = (formData.get('transactionId') || '').toString().trim();
+            const editableTransData = {
+                dealId: (formData.get('dealId') || '').toString(),
+                type: (formData.get('type') || 'expense').toString(),
+                category: (formData.get('category') || '').toString().trim(),
+                amount: parseFloat(formData.get('amount')),
+                description: (formData.get('description') || '').toString().trim(),
+                updatedAt: new Date().toISOString()
+            };
+
+            if (!firebaseEnabled) {
+                if (transId) {
+                    const idx = transactions.findIndex(t => t.id === transId);
+                    if (idx >= 0) transactions[idx] = { ...transactions[idx], ...editableTransData };
+                } else {
+                    transactions.unshift({
+                        id: makeId('trans'),
+                        ...editableTransData,
+                        date: new Date().toISOString()
+                    });
+                }
+                saveLocalState();
+                render();
+            } else {
+                if (transId) {
+                    await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', transId), editableTransData);
+                } else {
+                    await addDoc(getTransRef(currentUser.uid), {
+                        ...editableTransData,
+                        date: new Date().toISOString()
+                    });
+                }
+            }
+            e.target.reset();
+            closeModal('finance-modal');
+        };
+
+        window.deleteTransaction = async (transId) => {
+            if (!currentUser) return;
+            const id = (transId || '').toString().trim();
+            if (!id) return;
+            const ok = window.confirm('¿Eliminar este movimiento?');
+            if (!ok) return;
+            if (!firebaseEnabled) {
+                transactions = transactions.filter(t => t.id !== id);
+                saveLocalState();
+                render();
+            } else {
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', id));
+            }
+        };
+
+        window.saveBoardTitles = async () => {
+            if (!currentUser) return;
+            const title = (document.getElementById('board-title-input')?.value || '').toString().trim();
+            const subtitle = (document.getElementById('board-subtitle-input')?.value || '').toString().trim();
+            uiSettings = {
+                ...uiSettings,
+                boardTitle: title || uiSettings.boardTitle,
+                boardSubtitle: subtitle || uiSettings.boardSubtitle
+            };
+            if (!firebaseEnabled) {
+                saveLocalState();
+                render();
+            } else {
+                await setDoc(getUiSettingsRef(currentUser.uid), {
+                    boardTitle: uiSettings.boardTitle,
+                    boardSubtitle: uiSettings.boardSubtitle,
+                    updatedAt: new Date().toISOString()
+                }, { merge: true });
+            }
+            window.cancelEditBoardTitles();
+        };
+
+        window.startEditStageTitles = () => {
+            const COLOR_OPTIONS = [
+                { label: 'Gris', value: 'border-slate-400' },
+                { label: 'Azul', value: 'border-sky-500' },
+                { label: 'Amarillo', value: 'border-amber-500' },
+                { label: 'Violeta', value: 'border-violet-500' },
+                { label: 'Naranja', value: 'border-orange-600' },
+                { label: 'Verde', value: 'border-emerald-600' },
+                { label: 'Rojo', value: 'border-red-600' }
+            ];
+
+            function slugifyLabel(label) {
+                return (label || '')
+                    .toString()
+                    .trim()
+                    .toLowerCase()
+                    .normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .replace(/[^a-z0-9]+/g, '_')
+                    .replace(/^_+|_+$/g, '') || 'etapa';
+            }
+
+            function renderStageEditor() {
+                const container = document.getElementById('stage-labels-editor');
+                if (!container) return;
+                const stages = Array.isArray(window.stageDraft) && window.stageDraft.length ? window.stageDraft : [];
+                container.innerHTML = stages.map(stage => {
+                    const options = COLOR_OPTIONS.map(o => `<option value="${o.value}" ${o.value === stage.color ? 'selected' : ''}>${o.label}</option>`).join('');
+                    const safeLabel = (stage.label || '').toString().replaceAll('"', '&quot;');
+                    return `
+                        <div class="grid grid-cols-1 md:grid-cols-5 gap-2 items-center border-b last:border-b-0 py-2">
+                            <div class="md:col-span-2">
+                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Nombre</label>
+                                <input type="text" class="w-full p-2 border rounded" data-stage-id="${stage.id}" data-field="label" value="${safeLabel}" />
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Color</label>
+                                <select class="w-full p-2 border rounded" data-stage-id="${stage.id}" data-field="color">${options}</select>
+                            </div>
+                            <div class="md:col-span-1 md:pt-6 flex md:justify-end">
+                                <button class="text-sm text-red-600 hover:underline" onclick="removeStageDraft('${stage.id}')">Eliminar</button>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            window.addStageDraft = () => {
+                const labelInput = document.getElementById('new-stage-label');
+                const colorSelect = document.getElementById('new-stage-color');
+                const label = (labelInput?.value || '').toString().trim();
+                const color = (colorSelect?.value || 'border-slate-400').toString();
+                if (!label) return;
+                const baseId = slugifyLabel(label);
+                const draft = Array.isArray(window.stageDraft) ? window.stageDraft : [];
+                let candidate = baseId;
+                let n = 2;
+                while (draft.some(s => s.id === candidate)) {
+                    candidate = `${baseId}_${n++}`;
+                }
+                draft.push({ id: candidate, label, color });
+                window.stageDraft = draft;
+                if (labelInput) labelInput.value = '';
+                renderStageEditor();
+            };
+
+            window.removeStageDraft = (stageId) => {
+                const draft = Array.isArray(window.stageDraft) ? window.stageDraft : [];
+                if (draft.length <= 1) {
+                    alert('Debe existir al menos una columna.');
+                    return;
+                }
+                const stage = draft.find(s => s.id === stageId);
+                const label = stage?.label || stageId;
+                const ok = window.confirm(`¿Eliminar la columna "${label}"?\n\nLos autos en esa columna se moverán a la primera columna al guardar.`);
+                if (!ok) return;
+                window.stageDraft = draft.filter(s => s.id !== stageId);
+                renderStageEditor();
+            };
+
+            // init draft from effective stages
+            window.stageDraft = getStages().map(s => ({
+                id: s.id,
+                label: (uiSettings.stageLabels?.[s.id] || s.label || '').toString(),
+                color: (s.color || 'border-slate-400').toString()
+            }));
+            renderStageEditor();
+            document.getElementById('stage-titles-editor')?.classList.remove('hidden');
+        };
+
+        window.cancelEditStageTitles = () => {
+            document.getElementById('stage-titles-editor')?.classList.add('hidden');
+            window.stageDraft = null;
+        };
+
+        window.saveStageTitles = async () => {
+            if (!currentUser) return;
+            const draft = Array.isArray(window.stageDraft) ? window.stageDraft : [];
+            if (!draft.length) return;
+
+            // Pull current editor values into draft
+            const editorFields = Array.from(document.querySelectorAll('#stage-labels-editor [data-stage-id][data-field]'));
+            editorFields.forEach((el) => {
+                const stageId = el.getAttribute('data-stage-id');
+                const field = el.getAttribute('data-field');
+                const idx = draft.findIndex(s => s.id === stageId);
+                if (idx < 0) return;
+                if (field === 'label') draft[idx].label = (el.value || '').toString().trim() || draft[idx].label;
+                if (field === 'color') draft[idx].color = (el.value || '').toString();
+            });
+
+            const firstStageId = draft[0].id;
+            const beforeStages = getStages();
+            const beforeIds = new Set(beforeStages.map(s => s.id));
+            const afterIds = new Set(draft.map(s => s.id));
+            const removedIds = Array.from(beforeIds).filter(id => !afterIds.has(id));
+
+            // Derive stageLabels from stages for compatibility
+            const stageLabels = {};
+            draft.forEach(s => { stageLabels[s.id] = s.label; });
+
+            uiSettings = { ...uiSettings, stages: draft, stageLabels };
+
+            if (!firebaseEnabled) {
+                if (removedIds.length) {
+                    deals = deals.map(d => removedIds.includes(d.status) ? { ...d, status: firstStageId, updatedAt: new Date().toISOString() } : d);
+                }
+                saveLocalState();
+                render();
+            } else {
+                if (removedIds.length) {
+                    const affected = deals.filter(d => removedIds.includes(d.status));
+                    const chunkSize = 400;
+                    for (let i = 0; i < affected.length; i += chunkSize) {
+                        const batch = writeBatch(db);
+                        affected.slice(i, i + chunkSize).forEach((d) => {
+                            const ref = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', d.id);
+                            batch.update(ref, { status: firstStageId, updatedAt: new Date().toISOString() });
+                        });
+                        await batch.commit();
+                    }
+                }
+
+                await setDoc(getUiSettingsRef(currentUser.uid), {
+                    stages: draft,
+                    stageLabels,
+                    updatedAt: new Date().toISOString()
+                }, { merge: true });
+            }
+
+            window.cancelEditStageTitles();
+        };
+
+        window.startEditBoardTitles = () => {
+            document.getElementById('board-title-input').value = uiSettings.boardTitle || '';
+            document.getElementById('board-subtitle-input').value = uiSettings.boardSubtitle || '';
+            document.getElementById('board-titles-display')?.classList.add('hidden');
+            document.getElementById('board-titles-editor')?.classList.remove('hidden');
+        };
+
+        window.cancelEditBoardTitles = () => {
+            document.getElementById('board-titles-editor')?.classList.add('hidden');
+            document.getElementById('board-titles-display')?.classList.remove('hidden');
+        };
+
+        window.openNewDealForm = () => {
+            const form = document.getElementById('deal-form');
+            if (form) form.reset();
+            const idInput = document.getElementById('deal-id');
+            if (idInput) idInput.value = '';
+            document.getElementById('deal-modal-title').textContent = 'Nueva Operación / Auto';
+            document.getElementById('deal-submit-btn').textContent = 'Crear Ficha';
+            openModal('deal-modal');
+        };
+
+        window.openEditDealForm = (dealId) => {
+            const deal = deals.find(d => d.id === dealId);
+            if (!deal) return;
+            const form = document.getElementById('deal-form');
+            if (!form) return;
+            form.reset();
+            document.getElementById('deal-id').value = deal.id;
+            form.querySelector('[name="clientName"]').value = deal.clientName || '';
+            form.querySelector('[name="clientEmail"]').value = deal.clientEmail || '';
+            form.querySelector('[name="carModel"]').value = deal.carModel || '';
+            form.querySelector('[name="carYear"]').value = deal.carYear || '';
+            form.querySelector('[name="price"]').value = deal.price ?? '';
+            form.querySelector('[name="location"]').value = deal.location || '';
+            form.querySelector('[name="notes"]').value = deal.notes || '';
+            form.querySelector('[name="reminder"]').value = deal.reminder || '';
+            document.getElementById('deal-modal-title').textContent = 'Editar Operación / Auto';
+            document.getElementById('deal-submit-btn').textContent = 'Guardar Cambios';
+            closeModal('detail-modal');
+            openModal('deal-modal');
+        };
+
+        window.openNewTransactionForm = () => {
+            const form = document.getElementById('finance-form');
+            if (form) form.reset();
+            const idInput = document.getElementById('finance-transaction-id');
+            if (idInput) idInput.value = '';
+            document.getElementById('finance-modal-title').textContent = 'Registrar Movimiento de Dinero';
+            document.getElementById('finance-submit-btn').textContent = 'Guardar';
+            // Asegura que el select esté actualizado
+            renderFinances();
+            openModal('finance-modal');
+        };
+
+        window.openEditTransactionForm = (transId) => {
+            const t = transactions.find(x => x.id === transId);
+            if (!t) return;
+            const form = document.getElementById('finance-form');
+            if (!form) return;
+            form.reset();
+            document.getElementById('finance-transaction-id').value = t.id;
+            document.getElementById('finance-modal-title').textContent = 'Editar Movimiento de Dinero';
+            document.getElementById('finance-submit-btn').textContent = 'Guardar Cambios';
+            // Asegura opciones en select
+            renderFinances();
+            form.querySelector('[name="dealId"]').value = t.dealId || '';
+            form.querySelector('[name="type"]').value = t.type || 'expense';
+            form.querySelector('[name="amount"]').value = t.amount ?? '';
+            form.querySelector('[name="category"]').value = t.category || '';
+            form.querySelector('[name="description"]').value = t.description || '';
+            openModal('finance-modal');
+        };
+
+        // --- Renderizado ---
+        const DEFAULT_STAGES = [
+            { id: 'visita_inicial', label: '1ra Visita / Inspección', color: 'border-slate-400' },
+            { id: 'publicado', label: 'Publicado / En Venta', color: 'border-sky-500' },
+            { id: 'muestras', label: 'Visitas / Muestras', color: 'border-amber-500' },
+            { id: 'senado', label: 'Señado', color: 'border-violet-500' },
+            { id: 'tramites', label: 'Trámites / Papeles', color: 'border-orange-600' },
+            { id: 'finalizado', label: 'Entregado / Finalizado', color: 'border-emerald-600' }
+        ];
+
+        function getStages() {
+            return Array.isArray(uiSettings.stages) && uiSettings.stages.length ? uiSettings.stages : DEFAULT_STAGES;
+        }
+
+        function getStageLabel(status) {
+            const stages = getStages();
+            const stage = stages.find(s => s.id === status);
+            const configured = stage?.id ? uiSettings.stageLabels?.[stage.id] : undefined;
+            return configured || stage?.label || (status || '').toString().replaceAll('_', ' ');
+        }
+
+        function render() {
+            if (activeView === 'board') renderBoard();
+            if (activeView === 'clients') renderClients();
+            if (activeView === 'finances') renderFinances();
+        }
+
+        function renderBoard() {
+            const container = document.getElementById('board-container');
+            container.innerHTML = '';
+
+            const titleEl = document.getElementById('board-title');
+            const subtitleEl = document.getElementById('board-subtitle');
+            if (titleEl) titleEl.textContent = uiSettings.boardTitle || 'Pipeline de Operaciones';
+            if (subtitleEl) subtitleEl.textContent = uiSettings.boardSubtitle || 'Gestiona el progreso de tus ventas activas.';
+
+            const stages = getStages();
+            stages.forEach((stage, stageIndex) => {
+                const stageDeals = deals.filter(d => d.status === stage.id);
+                const stageTitle = uiSettings.stageLabels?.[stage.id] || stage.label;
+                const col = document.createElement('div');
+                col.className = "flex-shrink-0 w-72 bg-gray-100 rounded-lg p-3 flex flex-col max-h-full";
+                col.innerHTML = `
+                    <h3 class="font-bold text-gray-700 mb-4 px-1 flex justify-between items-center">
+                        ${stageTitle}
+                        <span class="bg-gray-300 text-xs px-2 py-1 rounded-full">${stageDeals.length}</span>
+                    </h3>
+                    <div class="space-y-3 overflow-y-auto flex-1 pb-4 rounded-md" data-dropzone="1" ondragover="onDragOverStage(event)" ondragleave="onDragLeaveStage(event)" ondrop="onDropDealToStage(event, '${stage.id}')">
+                        ${stageDeals.map(deal => {
+                            const stageNotes = Array.isArray(deal.stageNotes) ? deal.stageNotes : [];
+                            const noteCount = stageNotes.filter(n => n && n.stageId === stage.id).length;
+                            return `
+                                <div draggable="true" ondragstart="onDragStartDeal(event, '${deal.id}')" ondragend="onDragEndDeal(event)" class="bg-white p-3 rounded shadow-sm border-l-4 ${stage.color} cursor-pointer hover:shadow-md transition-shadow" onclick="openDealDetails('${deal.id}')">
+                                    <div class="flex items-start justify-between gap-2">
+                                        <div class="min-w-0">
+                                            <div class="text-xs text-gray-500 font-bold mb-1">${escapeHtml(deal.carModel)} (${escapeHtml(deal.carYear)})</div>
+                                            <div class="text-sm font-semibold truncate">${escapeHtml(deal.clientName)}</div>
+                                        </div>
+                                        ${noteCount > 0 ? `<div class="shrink-0 text-[10px] bg-amber-100 text-amber-800 px-2 py-1 rounded-full font-bold">Notas: ${noteCount}</div>` : ''}
+                                    </div>
+                                    ${deal.reminder ? `<div class="text-[11px] text-gray-600 mt-1"><span class="font-semibold">Recordatorio:</span> ${escapeHtml(deal.reminder)}</div>` : ''}
+                                    <div class="mt-3 flex justify-between gap-1">
+                                        ${stageIndex > 0 ? `<button onclick="event.stopPropagation(); updateStatus('${deal.id}', '${stages[stageIndex-1].id}')" class="text-[10px] bg-gray-200 px-2 py-1 rounded">←</button>` : '<div></div>'}
+                                        ${stageIndex < stages.length - 1 ? `<button onclick="event.stopPropagation(); updateStatus('${deal.id}', '${stages[stageIndex+1].id}')" class="text-[10px] bg-blue-100 text-blue-600 px-2 py-1 rounded">Siguiente →</button>` : '<div></div>'}
+                                    </div>
+                                </div>
+                            `;
+                        }).join('')}
+                    </div>
+                `;
+                container.appendChild(col);
+            });
+        }
+
+        function renderClients() {
+            const searchVal = document.getElementById('client-search')?.value.toLowerCase() || '';
+            const tableBody = document.getElementById('clients-table-body');
+            const filteredDeals = deals.filter(d => 
+                (d.clientName || '').toString().toLowerCase().includes(searchVal) || 
+                (d.clientEmail || '').toString().toLowerCase().includes(searchVal) ||
+                (d.carModel || '').toString().toLowerCase().includes(searchVal)
+            );
+
+            tableBody.innerHTML = filteredDeals.map(deal => `
+                <tr class="border-b hover:bg-gray-50">
+                    <td class="p-3">${deal.clientName}</td>
+                    <td class="p-3 text-blue-600">${deal.clientEmail}</td>
+                    <td class="p-3 font-medium">${deal.carModel}</td>
+                    <td class="p-3"><span class="px-2 py-1 bg-gray-200 rounded-full text-xs">${getStageLabel(deal.status)}</span></td>
+                    <td class="p-3 text-right">
+                        <button onclick="openDealDetails('${deal.id}')" class="text-blue-500 hover:underline text-sm">Ver Historia</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function renderFinances() {
+            const list = document.getElementById('finance-list');
+            const totalIncome = transactions.filter(t => t.type === 'income').reduce((acc, t) => acc + t.amount, 0);
+            const totalExpense = transactions.filter(t => t.type === 'expense').reduce((acc, t) => acc + t.amount, 0);
+            
+            document.getElementById('total-balance').textContent = `$${(totalIncome - totalExpense).toLocaleString()}`;
+            
+            list.innerHTML = transactions.sort((a,b) => new Date(b.date) - new Date(a.date)).map(t => {
+                const deal = deals.find(d => d.id === t.dealId);
+                return `
+                <div class="flex items-center justify-between p-4 border-b">
+                    <div>
+                        <div class="font-bold">${t.description}</div>
+                        <div class="text-xs text-gray-500">${deal ? deal.carModel + ' - ' + deal.clientName : 'Gasto General'} | ${new Date(t.date).toLocaleDateString()}</div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="text-right font-bold ${t.type === 'income' ? 'text-green-600' : 'text-red-600'}">
+                            ${t.type === 'income' ? '+' : '-'}$${t.amount.toLocaleString()}
+                        </div>
+                        <button class="text-xs text-blue-600 hover:underline" onclick="openEditTransactionForm('${t.id}')">Editar</button>
+                        <button class="text-xs text-red-600 hover:underline" onclick="deleteTransaction('${t.id}')">Eliminar</button>
+                    </div>
+                </div>
+                `;
+            }).join('');
+
+            // Update select in modal
+            const dealSelect = document.getElementById('finance-deal-id');
+            if(dealSelect) {
+                dealSelect.innerHTML = '<option value="">Sin operación específica</option>' + 
+                    deals.map(d => `<option value="${d.id}">${d.carModel} - ${d.clientName}</option>`).join('');
+            }
+        }
+
+        // --- Modals ---
+        window.openModal = (id) => document.getElementById(id).classList.remove('hidden');
+        window.closeModal = (id) => document.getElementById(id).classList.add('hidden');
+        window.openDealDetails = (id) => {
+            if (window.isDragging) return;
+            const deal = deals.find(d => d.id === id);
+            if(!deal) return;
+            window.detailDealId = id;
+            const detailContent = document.getElementById('detail-content');
+            const dealTransactions = transactions.filter(t => t.dealId === id);
+            const balance = dealTransactions.reduce((acc, t) => t.type === 'income' ? acc + t.amount : acc - t.amount, 0);
+
+            const stages = getStages();
+            const stageNotes = Array.isArray(deal.stageNotes) ? deal.stageNotes : [];
+            const notesByStage = stages.map(s => ({
+                stageId: s.id,
+                stageLabel: uiSettings.stageLabels?.[s.id] || s.label,
+                items: stageNotes
+                    .filter(n => n && n.stageId === s.id)
+                    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+            })).filter(g => g.items.length);
+
+            detailContent.innerHTML = `
+                <div class="space-y-4">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-400 uppercase">Cliente</label>
+                            <p class="text-lg font-semibold">${escapeHtml(deal.clientName)}</p>
+                            <p class="text-sm text-blue-600">${escapeHtml(deal.clientEmail)}</p>
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-400 uppercase">Vehículo</label>
+                            <p class="text-lg font-semibold">${escapeHtml(deal.carModel)} (${escapeHtml(deal.carYear)})</p>
+                            <p class="text-sm text-gray-500">Valor ref: $${deal.price?.toLocaleString()}</p>
+                        </div>
+                    </div>
+                    <div class="bg-gray-50 p-3 rounded">
+                        <label class="block text-xs font-bold text-gray-400 uppercase mb-2">Estado Financiero de la Operación</label>
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm">Balance:</span>
+                            <span class="font-bold ${balance >= 0 ? 'text-green-600' : 'text-red-600'}">$${balance.toLocaleString()}</span>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-xs font-bold text-gray-400 uppercase">Notas</label>
+                        <p class="text-sm text-gray-700 italic">"${escapeHtml(deal.notes || 'Sin notas...')}"</p>
+                    </div>
+                    ${deal.reminder ? `
+                        <div>
+                            <label class="block text-xs font-bold text-gray-400 uppercase">Recordatorio</label>
+                            <p class="text-sm text-gray-700">${escapeHtml(deal.reminder)}</p>
+                        </div>
+                    ` : ''}
+
+                    <div class="pt-4 border-t">
+                        <h4 class="text-xs font-bold text-gray-400 uppercase mb-2">Notas por Etapa</h4>
+                        <div class="bg-gray-50 p-3 rounded">
+                            <div class="text-sm font-semibold mb-2">Etapa actual: ${escapeHtml(getStageLabel(deal.status))}</div>
+                            <div class="flex gap-2">
+                                <input id="stage-note-input" type="text" class="w-full p-2 border rounded" placeholder="Agregar nota para esta etapa..." />
+                                <button class="px-4 py-2 bg-gray-800 text-white rounded font-bold" onclick="addStageNote(window.detailDealId)">Agregar</button>
+                            </div>
+                        </div>
+                        <div class="mt-3 space-y-3">
+                            ${notesByStage.length ? notesByStage.map(group => `
+                                <div class="border rounded-lg overflow-hidden">
+                                    <div class="bg-gray-50 px-3 py-2 text-xs font-bold text-gray-600 uppercase">${escapeHtml(group.stageLabel)}</div>
+                                    <div class="max-h-32 overflow-y-auto">
+                                        ${group.items.map(n => `
+                                            <div class="px-3 py-2 border-t text-sm">
+                                                <div class="text-gray-800">${escapeHtml(n.text)}</div>
+                                                <div class="text-[11px] text-gray-500">${new Date(n.createdAt).toLocaleString()}</div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                </div>
+                            `).join('') : '<p class="text-sm text-gray-400">Todavía no hay notas por etapa.</p>'}
+                        </div>
+                    </div>
+                    <div class="pt-4 border-t">
+                         <h4 class="text-xs font-bold text-gray-400 uppercase mb-2">Historial de Movimientos</h4>
+                         <div class="max-h-40 overflow-y-auto space-y-1">
+                            ${dealTransactions.length ? dealTransactions.map(t => `
+                                <div class="flex justify-between items-center text-xs p-1 border-b gap-2">
+                                    <span class="truncate">${t.description}</span>
+                                    <span class="flex items-center gap-2 shrink-0">
+                                        <span class="${t.type === 'income' ? 'text-green-600' : 'text-red-600'} font-bold">$${t.amount.toLocaleString()}</span>
+                                        <button class="text-blue-600 hover:underline" onclick="openEditTransactionForm('${t.id}')">Editar</button>
+                                        <button class="text-red-600 hover:underline" onclick="deleteTransaction('${t.id}')">Eliminar</button>
+                                    </span>
+                                </div>
+                            `).join('') : '<p class="text-xs text-gray-400">No hay movimientos registrados.</p>'}
+                         </div>
+                    </div>
+                </div>
+            `;
+            openModal('detail-modal');
+        };
+
+        // --- Inicialización ---
+        window.addEventListener('DOMContentLoaded', () => {
+            if (!firebaseEnabled) {
+                currentUser = { uid: LOCAL_UID };
+                loadLocalState();
+                render();
+            }
+
+            // Ensure auth overlay renders correct state on first paint
+            setAuthUiState(currentUser);
+            
+            // Navegación
+            document.querySelectorAll('.nav-link').forEach(link => {
+                link.addEventListener('click', () => switchView(link.dataset.view));
+            });
+
+            // Buscador clientes
+            document.getElementById('client-search')?.addEventListener('input', renderClients);
+        });
+
+    </script>
+    <style>
+        .custom-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
+        .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+        .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .custom-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    </style>
+</head>
+<body class="bg-gray-50 text-gray-900 h-screen flex flex-col overflow-hidden">
+
+    <!-- Header -->
+    <header class="bg-blue-900 text-white p-4 shadow-lg flex justify-between items-center shrink-0">
+        <div class="flex items-center gap-3">
+            <div class="bg-white text-blue-900 p-2 rounded-lg font-black text-xl">AM</div>
+            <h1 class="text-xl font-bold tracking-tight">AutoManager <span class="text-blue-300 font-normal">CRM</span></h1>
+        </div>
+        <div class="flex items-center gap-3">
+            <div class="hidden md:block text-xs text-blue-200">
+                <span id="auth-user-label"></span>
+            </div>
+            <button id="auth-logout-btn" onclick="authLogout()" class="hidden bg-blue-950/40 hover:bg-blue-950/60 px-3 py-2 rounded-lg text-sm font-semibold transition">Salir</button>
+            <button onclick="openNewDealForm()" class="bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg text-sm font-semibold transition shadow-md">+ Nuevo Auto</button>
+            <button onclick="openNewTransactionForm()" class="bg-green-600 hover:bg-green-500 px-4 py-2 rounded-lg text-sm font-semibold transition shadow-md">+ Registrar Gasto/Venta</button>
+        </div>
+    </header>
+
+    <div class="flex flex-1 overflow-hidden">
+        <!-- Sidebar Sidebar -->
+        <aside class="w-64 bg-blue-800 text-white flex flex-col hidden md:flex shrink-0">
+            <nav class="mt-6 flex-1 px-4 space-y-2">
+                <button data-view="board" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7m0 10a2 2 0 002 2h2a2 2 0 002-2V7a2 2 0 00-2-2h-2a2 2 0 00-2 2"></path></svg>
+                    Tablero Pipeline
+                </button>
+                <button data-view="clients" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                    Base de Clientes
+                </button>
+                <button data-view="finances" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    Caja y Finanzas
+                </button>
+            </nav>
+            <div class="p-4 text-xs text-blue-300 border-t border-blue-700">
+                &copy; 2024 Vendedores de Elite
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="flex-1 overflow-hidden flex flex-col p-6">
+            
+            <!-- Vista 1: Tablero Kanban -->
+            <div id="view-board" class="h-full flex flex-col">
+                <div class="mb-4 flex items-start justify-between gap-4">
+                    <div class="flex-1" id="board-titles-display">
+                        <h2 id="board-title" class="text-2xl font-bold text-gray-800">Pipeline de Operaciones</h2>
+                        <p id="board-subtitle" class="text-gray-500 text-sm">Gestiona el progreso de tus ventas activas.</p>
+                    </div>
+                    <div class="shrink-0">
+                        <div class="flex items-center gap-4 justify-end">
+                            <button onclick="startEditBoardTitles()" class="text-sm text-blue-600 hover:underline">Editar títulos</button>
+                            <button onclick="startEditStageTitles()" class="text-sm text-blue-600 hover:underline">Editar columnas</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="board-titles-editor" class="hidden mb-4 bg-white border rounded-xl p-4 shadow-sm">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Título</label>
+                            <input id="board-title-input" type="text" class="w-full p-2 border rounded" placeholder="Ej: Pipeline de Operaciones">
+                        </div>
+                        <div>
+                            <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Subtítulo</label>
+                            <input id="board-subtitle-input" type="text" class="w-full p-2 border rounded" placeholder="Ej: Gestiona el progreso...">
+                        </div>
+                    </div>
+                    <div class="flex justify-end gap-2 pt-4">
+                        <button onclick="cancelEditBoardTitles()" class="px-4 py-2 text-gray-500">Cancelar</button>
+                        <button onclick="saveBoardTitles()" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                    </div>
+                </div>
+
+                <div id="stage-titles-editor" class="hidden mb-4 bg-white border rounded-xl p-4 shadow-sm">
+                    <div class="flex items-center justify-between gap-3 mb-3">
+                        <div>
+                            <h3 class="text-sm font-bold text-gray-700">Títulos de Columnas</h3>
+                            <p class="text-xs text-gray-500">Se guardan por usuario.</p>
+                        </div>
+                        <button onclick="cancelEditStageTitles()" class="text-sm text-gray-500 hover:underline">Cerrar</button>
+                    </div>
+                    <div id="stage-labels-editor" class="divide-y"></div>
+                    <div class="mt-4 bg-gray-50 border rounded-lg p-3">
+                        <div class="text-xs font-bold text-gray-400 uppercase mb-2">Agregar Columna</div>
+                        <div class="grid grid-cols-1 md:grid-cols-5 gap-2 items-end">
+                            <div class="md:col-span-3">
+                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Nombre</label>
+                                <input id="new-stage-label" type="text" class="w-full p-2 border rounded" placeholder="Ej: Reserva / Seña" />
+                            </div>
+                            <div class="md:col-span-2">
+                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Color</label>
+                                <select id="new-stage-color" class="w-full p-2 border rounded">
+                                    <option value="border-slate-400">Gris</option>
+                                    <option value="border-sky-500" selected>Azul</option>
+                                    <option value="border-amber-500">Amarillo</option>
+                                    <option value="border-violet-500">Violeta</option>
+                                    <option value="border-orange-600">Naranja</option>
+                                    <option value="border-emerald-600">Verde</option>
+                                    <option value="border-red-600">Rojo</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="flex justify-end pt-3">
+                            <button onclick="addStageDraft()" class="px-4 py-2 bg-gray-800 text-white rounded-lg font-bold">Agregar</button>
+                        </div>
+                    </div>
+                    <div class="flex justify-end gap-2 pt-4">
+                        <button onclick="cancelEditStageTitles()" class="px-4 py-2 text-gray-500">Cancelar</button>
+                        <button onclick="saveStageTitles()" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                    </div>
+                </div>
+                <div id="board-container" class="flex-1 flex gap-4 overflow-x-auto pb-4 custom-scroll items-start">
+                    <!-- Columnas se renderizan con JS -->
+                </div>
+            </div>
+
+            <!-- Vista 2: Clientes -->
+            <div id="view-clients" class="hidden h-full flex flex-col">
+                <div class="mb-4 flex justify-between items-center">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-800">Histórico de Clientes</h2>
+                        <p class="text-gray-500 text-sm">Busca clientes actuales y pasados.</p>
+                    </div>
+                    <div class="w-64">
+                        <input type="text" id="client-search" placeholder="Buscar por nombre, email o auto..." class="w-full p-2 border rounded-lg shadow-sm focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                </div>
+                <div class="flex-1 bg-white rounded-xl shadow-sm overflow-hidden border">
+                    <div class="overflow-y-auto max-h-full">
+                        <table class="w-full text-left border-collapse">
+                            <thead class="bg-gray-50 sticky top-0">
+                                <tr>
+                                    <th class="p-3 font-semibold text-gray-600 text-sm uppercase">Cliente</th>
+                                    <th class="p-3 font-semibold text-gray-600 text-sm uppercase">Email</th>
+                                    <th class="p-3 font-semibold text-gray-600 text-sm uppercase">Auto</th>
+                                    <th class="p-3 font-semibold text-gray-600 text-sm uppercase">Último Estado</th>
+                                    <th class="p-3 font-semibold text-gray-600 text-sm uppercase text-right">Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody id="clients-table-body">
+                                <!-- Filas JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Vista 3: Finanzas -->
+            <div id="view-finances" class="hidden h-full flex flex-col">
+                <div class="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-800">Estado de Caja</h2>
+                        <p class="text-gray-500 text-sm">Control de comisiones, gastos de gestoría y señas.</p>
+                    </div>
+                    <div class="bg-white p-4 rounded-xl shadow-sm border flex items-center gap-4">
+                        <span class="text-gray-500 font-semibold uppercase text-xs">Balance Neto Total:</span>
+                        <span id="total-balance" class="text-3xl font-black text-blue-700">$0</span>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 flex-1 overflow-hidden">
+                    <div class="md:col-span-2 bg-white rounded-xl shadow-sm border overflow-hidden flex flex-col">
+                        <div class="p-4 bg-gray-50 border-b font-bold text-sm">Últimos Movimientos</div>
+                        <div id="finance-list" class="flex-1 overflow-y-auto">
+                            <!-- Lista JS -->
+                        </div>
+                    </div>
+                    <div class="bg-blue-50 rounded-xl p-6 border border-blue-100 h-fit">
+                        <h3 class="font-bold text-blue-900 mb-4">Recordatorios Rápidos</h3>
+                        <ul class="text-sm space-y-4 text-blue-800">
+                            <li class="flex gap-2">✅ Verificar Verificación Policial.</li>
+                            <li class="flex gap-2">✅ Pedir informes (Dominio/Inhibición).</li>
+                            <li class="flex gap-2">✅ Libre Deuda Infracciones.</li>
+                            <li class="flex gap-2">✅ Firmar 08 ante escribano/registro.</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal: Nuevo Deal -->
+    <div id="deal-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
+            <div class="p-6">
+                <h3 id="deal-modal-title" class="text-xl font-bold mb-4">Nueva Operación / Auto</h3>
+                <form id="deal-form" onsubmit="saveDeal(event)" class="space-y-4">
+                    <input type="hidden" name="dealId" id="deal-id" value="">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Nombre Cliente</label>
+                            <input type="text" name="clientName" required class="w-full p-2 border rounded">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Email</label>
+                            <input type="email" name="clientEmail" required class="w-full p-2 border rounded">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Modelo de Auto</label>
+                            <input type="text" name="carModel" required placeholder="Ej: VW Golf GTI" class="w-full p-2 border rounded">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Año</label>
+                            <input type="number" name="carYear" required class="w-full p-2 border rounded">
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Precio Estimado</label>
+                            <input type="number" name="price" class="w-full p-2 border rounded">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Ubicación</label>
+                            <input type="text" name="location" placeholder="¿Lo tiene el dueño?" class="w-full p-2 border rounded">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Notas Iniciales</label>
+                        <textarea name="notes" class="w-full p-2 border rounded h-24" placeholder="Detalles de inspección..."></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Recordatorio (se ve en la card)</label>
+                        <input type="text" name="reminder" class="w-full p-2 border rounded" placeholder="Ej: Llamar mañana, pedir informe, etc.">
+                    </div>
+                    <div class="flex justify-end gap-2 pt-4">
+                        <button type="button" onclick="closeModal('deal-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                        <button id="deal-submit-btn" type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Crear Ficha</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Finanzas -->
+    <div id="finance-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden">
+            <div class="p-6">
+                <h3 id="finance-modal-title" class="text-xl font-bold mb-4">Registrar Movimiento de Dinero</h3>
+                <form id="finance-form" onsubmit="addTransaction(event)" class="space-y-4">
+                    <input type="hidden" name="transactionId" id="finance-transaction-id" value="">
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Operación Relacionada</label>
+                        <select name="dealId" id="finance-deal-id" class="w-full p-2 border rounded"></select>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Tipo</label>
+                            <select name="type" class="w-full p-2 border rounded">
+                                <option value="income">Ingreso / Cobro / Seña</option>
+                                <option value="expense">Gasto / Gestoría / Reparación</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium mb-1">Monto ($)</label>
+                            <input type="number" name="amount" required class="w-full p-2 border rounded">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Categoría</label>
+                        <input type="text" name="category" placeholder="Ej: Gestoría, Seña, Reparación" class="w-full p-2 border rounded">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Concepto / Descripción</label>
+                        <input type="text" name="description" required placeholder="Ej: Seña reserva 10%, Pago Gestoría, etc." class="w-full p-2 border rounded">
+                    </div>
+                    <div class="flex justify-end gap-2 pt-4">
+                        <button type="button" onclick="closeModal('finance-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                        <button id="finance-submit-btn" type="submit" class="px-6 py-2 bg-green-600 text-white rounded-lg font-bold">Guardar</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Detalles -->
+    <div id="detail-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl w-full max-w-2xl overflow-hidden shadow-2xl">
+            <div class="p-6 bg-blue-50 border-b flex justify-between items-center">
+                <h3 class="text-xl font-bold text-blue-900">Ficha Detallada</h3>
+                <button onclick="closeModal('detail-modal')" class="text-gray-400 hover:text-gray-600">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div id="detail-content" class="p-6">
+                <!-- JS -->
+            </div>
+            <div class="p-4 bg-gray-50 flex justify-between items-center gap-3">
+                <div class="flex gap-2">
+                    <button onclick="openEditDealForm(window.detailDealId)" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold">Editar</button>
+                    <button onclick="deleteDeal(window.detailDealId)" class="bg-red-600 text-white px-4 py-2 rounded-lg font-bold">Eliminar</button>
+                </div>
+                <button onclick="closeModal('detail-modal')" class="bg-gray-800 text-white px-6 py-2 rounded-lg font-bold">Cerrar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Auth Overlay -->
+    <div id="auth-overlay" class="fixed inset-0 bg-gray-900/60 hidden items-center justify-center z-[60] p-4">
+        <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+            <div class="p-6 border-b bg-gray-50">
+                <h3 class="text-xl font-bold text-gray-900">Ingresar</h3>
+                <p class="text-sm text-gray-500">Accedé con tu cuenta para ver tus autos.</p>
+            </div>
+            <div class="p-6">
+                <form onsubmit="authLogin(event)" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Email</label>
+                        <input id="auth-email" type="email" class="w-full p-2 border rounded" placeholder="tu@email.com" required />
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-1">Contraseña</label>
+                        <input id="auth-password" type="password" class="w-full p-2 border rounded" placeholder="********" required />
+                    </div>
+                    <div id="auth-message" class="text-sm text-red-600"></div>
+                    <div class="flex items-center justify-between gap-2 pt-2">
+                        <button type="button" onclick="authResetPassword()" class="text-sm text-blue-600 hover:underline">Olvidé mi contraseña</button>
+                        <div class="flex gap-2">
+                            <button type="button" onclick="authSignup()" class="px-4 py-2 bg-gray-800 text-white rounded-lg font-bold">Crear cuenta</button>
+                            <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-bold">Ingresar</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>

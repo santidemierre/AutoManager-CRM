@@ -1177,7 +1177,7 @@
                         <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
                             <div>
                                 <label class="block text-sm font-medium mb-1">Fecha Ingreso</label>
-                                <input type="text" name="stockDate" class="w-full p-2 border rounded">
+                                <input type="date" name="stockDate" class="w-full p-2 border rounded">
                             </div>
                             <div>
                                 <label class="block text-sm font-medium mb-1">Ubicacion</label>
@@ -1263,10 +1263,10 @@
                         <input type="text" name="vendedor" placeholder="Vendedor" class="w-full p-2 border rounded">
                         <input type="text" name="celularVendedor" placeholder="Celular vendedor" class="w-full p-2 border rounded">
                         <input type="text" name="senaTurno" placeholder="Sena/Turno" class="w-full p-2 border rounded">
-                        <input type="text" name="diaTransfer" placeholder="Dia transferencia" class="w-full p-2 border rounded">
+                        <input type="date" name="diaTransfer" placeholder="Dia transferencia" class="w-full p-2 border rounded">
                         <input type="text" name="comprador" placeholder="Comprador" class="w-full p-2 border rounded">
                         <input type="text" name="celularComprador" placeholder="Celular comprador" class="w-full p-2 border rounded">
-                        <input type="text" name="fechaDefinitiva" placeholder="Fecha definitiva" class="w-full p-2 border rounded">
+                        <input type="date" name="fechaDefinitiva" placeholder="Fecha definitiva" class="w-full p-2 border rounded">
                         <input type="text" name="ganancia" placeholder="Ganancia" class="w-full p-2 border rounded">
                         <input type="text" name="propina" placeholder="Propina" class="w-full p-2 border rounded">
                     </div>
@@ -1294,7 +1294,7 @@
                         <input type="text" name="precio" placeholder="Precio" class="w-full p-2 border rounded">
                         <input type="text" name="vendedor" placeholder="Vendedor" class="w-full p-2 border rounded">
                         <input type="text" name="ganancia" placeholder="Ganancia" class="w-full p-2 border rounded">
-                        <input type="text" name="fecha" placeholder="Fecha" class="w-full p-2 border rounded">
+                        <input type="date" name="fecha" placeholder="Fecha" class="w-full p-2 border rounded">
                     </div>
                     <div class="flex justify-end gap-2 pt-4">
                         <button type="button" onclick="closeModal('ventas-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
@@ -1339,7 +1339,7 @@
                 <form id="scanner-form" onsubmit="saveScanner(event)" class="space-y-4">
                     <input type="hidden" name="rowId" value="">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <input type="text" name="dia" placeholder="Dia" class="w-full p-2 border rounded">
+                        <input type="date" name="dia" placeholder="Dia" class="w-full p-2 border rounded">
                         <input type="text" name="auto" placeholder="Auto" class="w-full p-2 border rounded">
                         <input type="text" name="clienteNumero" placeholder="Cliente/Numero" class="w-full p-2 border rounded">
                         <input type="text" name="tipo" placeholder="Particular/Agencia" class="w-full p-2 border rounded">
@@ -1365,7 +1365,7 @@
                 <form id="movimientos-form" onsubmit="saveMovimiento(event)" class="space-y-4">
                     <input type="hidden" name="rowId" value="">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <input type="text" name="fecha" placeholder="Fecha" class="w-full p-2 border rounded">
+                        <input type="date" name="fecha" placeholder="Fecha" class="w-full p-2 border rounded">
                         <select name="tipo" class="w-full p-2 border rounded">
                             <option value="ingreso">Ingreso</option>
                             <option value="gasto">Gasto</option>

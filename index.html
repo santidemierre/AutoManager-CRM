@@ -53,7 +53,7 @@
         const localKey = (suffix) => `amcrm:${appId}:${suffix}`;
 
         let currentUser = null;
-        let activeView = 'autos';
+        let activeView = 'kanban';
         let autos = [];
         let senados = [];
         let ventas = [];
@@ -166,6 +166,7 @@
         function switchView(viewName) {
             activeView = viewName;
             const views = {
+                kanban: document.getElementById('view-kanban'),
                 autos: document.getElementById('view-autos'),
                 senados: document.getElementById('view-senados'),
                 ventas: document.getElementById('view-ventas'),
@@ -350,6 +351,26 @@
             return Number.isFinite(num) ? num : 0;
         }
 
+        async function updateAutoStatus(autoId, status) {
+            if (!currentUser) return;
+            const id = (autoId || '').toString().trim();
+            if (!id) return;
+            const nextStatus = (status || '').toString().trim();
+            if (!nextStatus) return;
+            const now = new Date().toISOString();
+
+            if (!firebaseEnabled) {
+                autos = autos.map(a => a.id === id ? { ...a, status: nextStatus, updatedAt: now } : a);
+                saveLocalState();
+                render();
+            } else {
+                await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'autos', id), {
+                    status: nextStatus,
+                    updatedAt: now
+                });
+            }
+        }
+
         window.saveAuto = async (e) => {
             e.preventDefault();
             if (!currentUser) return;
@@ -358,6 +379,7 @@
             const now = new Date().toISOString();
             const fallbackUnique = (formData.get('plate') || '').toString().trim();
             const uniqueCode = (formData.get('uniqueCode') || '').toString().trim() || fallbackUnique || makeId('auto');
+            const defaultStatus = (formData.get('status') || '').toString().trim() || 'para_ver';
             const payload = {
                 uniqueCode,
                 autoName: (formData.get('autoName') || '').toString().trim(),
@@ -376,7 +398,7 @@
                 collision: (formData.get('collision') || '').toString().trim(),
                 sellReason: (formData.get('sellReason') || '').toString().trim(),
                 price: normalizeNumber(formData.get('price')),
-                status: (formData.get('status') || '').toString().trim(),
+                status: defaultStatus,
                 stockDate: (formData.get('stockDate') || '').toString().trim(),
                 location: (formData.get('location') || '').toString().trim(),
                 content: (formData.get('content') || '').toString().trim(),
@@ -509,6 +531,12 @@
             openModal('auto-modal');
         };
 
+        window.openNewAutoFormWithStatus = (status) => {
+            window.openNewAutoForm();
+            const form = document.getElementById('auto-form');
+            form?.querySelector('[name="status"]')?.value = status || '';
+        };
+
         window.openEditAutoForm = (autoId) => {
             const auto = getAutoById(autoId);
             if (!auto) return;
@@ -629,6 +657,41 @@
             `).join('');
         }
 
+        function renderKanban() {
+            const container = document.getElementById('kanban-board');
+            if (!container) return;
+            const searchVal = document.getElementById('kanban-search')?.value.toLowerCase() || '';
+
+            container.innerHTML = STATUS_OPTIONS.map((stage) => {
+                const stageAutos = autos.filter(a => {
+                    const matchesStatus = (a.status || 'para_ver') === stage.value;
+                    const haystack = `${a.autoName || ''} ${a.ownerName || ''} ${a.plate || ''} ${a.uniqueCode || ''}`.toLowerCase();
+                    const matchesSearch = !searchVal || haystack.includes(searchVal);
+                    return matchesStatus && matchesSearch;
+                });
+
+                return `
+                    <div class="flex-shrink-0 w-80 bg-gray-100 rounded-xl p-3 flex flex-col max-h-full">
+                        <div class="flex items-center justify-between mb-3">
+                            <div class="font-bold text-gray-700">${escapeHtml(stage.label)}</div>
+                            <span class="bg-gray-300 text-xs px-2 py-1 rounded-full">${stageAutos.length}</span>
+                        </div>
+                        <button class="mb-3 text-xs text-blue-600 hover:underline" onclick="openNewAutoFormWithStatus('${stage.value}')">+ Nuevo en ${escapeHtml(stage.label)}</button>
+                        <div class="space-y-3 overflow-y-auto flex-1 pb-3 rounded-md" data-dropzone="1" ondragover="onDragOverStatus(event)" ondragleave="onDragLeaveStatus(event)" ondrop="onDropAutoToStatus(event, '${stage.value}')">
+                            ${stageAutos.map(a => `
+                                <div draggable="true" ondragstart="onDragStartAuto(event, '${a.id}')" ondragend="onDragEndAuto()" class="bg-white p-3 rounded shadow-sm border-l-4 border-sky-500 cursor-pointer hover:shadow-md transition-shadow" onclick="openEditAutoForm('${a.id}')">
+                                    <div class="text-xs text-gray-500 font-bold mb-1">${escapeHtml(a.uniqueCode || 'AUTO')}</div>
+                                    <div class="text-sm font-semibold">${escapeHtml(a.autoName || 'Sin modelo')}</div>
+                                    <div class="text-xs text-gray-500">${escapeHtml(a.year || '')} ${a.plate ? '• ' + escapeHtml(a.plate) : ''}</div>
+                                    <div class="mt-2 text-xs text-gray-600">$${(a.price || 0).toLocaleString()}</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
         function renderTable(list, tbodyId, columns, emptyLabel) {
             const tbody = document.getElementById(tbodyId);
             tbody.innerHTML = list.length ? list.map(row => `
@@ -668,6 +731,7 @@
         }
 
         function render() {
+            if (activeView === 'kanban') renderKanban();
             if (activeView === 'autos') renderAutos();
             if (activeView === 'senados') renderSenados();
             if (activeView === 'ventas') renderVentas();
@@ -675,6 +739,49 @@
             if (activeView === 'scanner') renderScanner();
             if (activeView === 'caja') renderCaja();
         }
+
+        window.draggingAutoId = null;
+        window.onDragStartAuto = (e, autoId) => {
+            window.draggingAutoId = autoId;
+            if (e?.dataTransfer) {
+                e.dataTransfer.setData('text/plain', autoId);
+                e.dataTransfer.effectAllowed = 'move';
+            }
+        };
+
+        window.onDragEndAuto = () => {
+            window.draggingAutoId = null;
+            document.querySelectorAll('[data-dropzone="1"]').forEach(el => {
+                el.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
+            });
+        };
+
+        window.onDragOverStatus = (e) => {
+            e.preventDefault();
+            if (!e.currentTarget) return;
+            e.currentTarget.classList.add('ring-2', 'ring-blue-400', 'bg-blue-50');
+        };
+
+        window.onDragLeaveStatus = (e) => {
+            if (!e.currentTarget) return;
+            e.currentTarget.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
+        };
+
+        window.onDropAutoToStatus = async (e, status) => {
+            e.preventDefault();
+            const target = e.currentTarget;
+            if (target) target.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
+
+            let autoId = '';
+            try {
+                autoId = (e.dataTransfer.getData('text/plain') || '').toString();
+            } catch {
+                autoId = (window.draggingAutoId || '').toString();
+            }
+            autoId = autoId.trim();
+            if (!autoId) return;
+            await updateAutoStatus(autoId, status);
+        };
 
         window.openModal = (id) => document.getElementById(id).classList.remove('hidden');
         window.closeModal = (id) => document.getElementById(id).classList.add('hidden');
@@ -696,6 +803,7 @@
 
             document.getElementById('auto-search')?.addEventListener('input', renderAutos);
             document.getElementById('auto-status-filter')?.addEventListener('change', renderAutos);
+            document.getElementById('kanban-search')?.addEventListener('input', renderKanban);
         });
     </script>
     <style>
@@ -754,7 +862,8 @@
                 </button>
             </div>
             <nav class="mt-4 flex-1 px-4 space-y-2">
-                <button data-view="autos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">Autos</button>
+                <button data-view="kanban" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">Kanban</button>
+                <button data-view="autos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Inventario</button>
                 <button data-view="senados" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Senados</button>
                 <button data-view="ventas" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Ventas externas</button>
                 <button data-view="pedidos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Pedidos</button>
@@ -768,7 +877,8 @@
     <div class="flex flex-1 overflow-hidden">
         <aside class="w-64 bg-blue-800 text-white flex flex-col hidden md:flex shrink-0">
             <nav class="mt-6 flex-1 px-4 space-y-2">
-                <button data-view="autos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">Autos</button>
+                <button data-view="kanban" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">Kanban</button>
+                <button data-view="autos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Inventario</button>
                 <button data-view="senados" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Senados</button>
                 <button data-view="ventas" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Ventas externas</button>
                 <button data-view="pedidos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Pedidos</button>
@@ -779,7 +889,21 @@
         </aside>
 
         <main class="flex-1 overflow-hidden flex flex-col p-6">
-            <div id="view-autos" class="h-full flex flex-col">
+            <div id="view-kanban" class="h-full flex flex-col">
+                <div class="mb-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-800">Pipeline de Autos</h2>
+                        <p class="text-gray-500 text-sm">Movelos por etapa como en Jira.</p>
+                    </div>
+                    <div class="flex gap-3">
+                        <input type="text" id="kanban-search" placeholder="Buscar por auto, cliente, patente..." class="w-64 p-2 border rounded-lg shadow-sm">
+                        <button onclick="openNewAutoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo Auto</button>
+                    </div>
+                </div>
+                <div id="kanban-board" class="flex-1 flex gap-4 overflow-x-auto pb-4 custom-scroll items-start"></div>
+            </div>
+
+            <div id="view-autos" class="hidden h-full flex flex-col">
                 <div class="mb-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div>
                         <h2 class="text-2xl font-bold text-gray-800">Inventario de Autos</h2>

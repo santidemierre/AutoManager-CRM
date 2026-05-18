@@ -53,638 +53,1297 @@
             app = null;
             auth = null;
             db = null;
-        }
+        <!DOCTYPE html>
+        <html lang="es">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>AutoManager - Inventario y Ventas</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <script type="module">
+                import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+                import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+                import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // --- Estado Global ---
-        let currentUser = null;
-        let activeView = 'board';
-        let deals = [];
-        let transactions = [];
-        let uiSettings = {
-            boardTitle: 'Pipeline de Operaciones',
-            boardSubtitle: 'Gestiona el progreso de tus ventas activas.',
-            stageLabels: {},
-            stages: null
-        };
-        window.detailDealId = null;
-        window.stageDraft = null;
-        let unsubscribers = [];
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'auto-manager-crm';
+                const FALLBACK_FIREBASE_CONFIG = {
+                    apiKey: "AIzaSyDIhcqpvmTbK4oXp7yhF1eJts2PUNtzjcs",
+                    authDomain: "automanager-crm.firebaseapp.com",
+                    projectId: "automanager-crm",
+                    storageBucket: "automanager-crm.firebasestorage.app",
+                    messagingSenderId: "942741288564",
+                    appId: "1:942741288564:web:83f7192c77bca3129b8321"
+                };
 
-        // --- Persistencia Local (fallback) ---
-        const LOCAL_UID = 'local';
-        const localKey = (suffix) => `amcrm:${appId}:${suffix}`;
+                let firebaseConfig = {};
+                try {
+                    firebaseConfig = window.__firebase_config ? JSON.parse(window.__firebase_config) : FALLBACK_FIREBASE_CONFIG;
+                } catch {
+                    firebaseConfig = FALLBACK_FIREBASE_CONFIG;
+                }
 
-        function safeJsonParse(val, fallback) {
-            try {
-                return JSON.parse(val);
-            } catch {
-                return fallback;
-            }
-        }
+                let firebaseEnabled = false;
+                let app = null;
+                let auth = null;
+                let db = null;
 
-        function loadLocalState() {
-            deals = safeJsonParse(localStorage.getItem(localKey('deals')) || '[]', []);
-            transactions = safeJsonParse(localStorage.getItem(localKey('transactions')) || '[]', []);
-            const storedUi = safeJsonParse(localStorage.getItem(localKey('uiSettings')) || '{}', {});
-            uiSettings = {
-                ...uiSettings,
-                ...(typeof storedUi.boardTitle === 'string' ? { boardTitle: storedUi.boardTitle } : {}),
-                ...(typeof storedUi.boardSubtitle === 'string' ? { boardSubtitle: storedUi.boardSubtitle } : {}),
-                ...(storedUi.stageLabels && typeof storedUi.stageLabels === 'object' ? { stageLabels: storedUi.stageLabels } : {}),
-                ...(Array.isArray(storedUi.stages) ? { stages: storedUi.stages } : {})
-            };
-        }
+                try {
+                    if (firebaseConfig && firebaseConfig.apiKey) {
+                        app = initializeApp(firebaseConfig);
+                        auth = getAuth(app);
+                        db = getFirestore(app);
+                        firebaseEnabled = true;
+                    } else {
+                        console.warn('Firebase no configurado. Usando localStorage.');
+                    }
+                } catch (error) {
+                    console.error('Firebase init error. Usando localStorage.', error);
+                    firebaseEnabled = false;
+                    app = null;
+                    auth = null;
+                    db = null;
+                }
 
-        function saveLocalState() {
-            localStorage.setItem(localKey('deals'), JSON.stringify(deals));
-            localStorage.setItem(localKey('transactions'), JSON.stringify(transactions));
-            localStorage.setItem(localKey('uiSettings'), JSON.stringify(uiSettings));
-        }
+                const LOCAL_UID = 'local';
+                const localKey = (suffix) => `amcrm:${appId}:${suffix}`;
 
-        function makeId(prefix) {
-            if (typeof crypto !== 'undefined' && crypto.randomUUID) return `${prefix}_${crypto.randomUUID()}`;
-            return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
-        }
+                let currentUser = null;
+                let activeView = 'autos';
+                let autos = [];
+                let senados = [];
+                let ventas = [];
+                let pedidos = [];
+                let scanner = [];
+                let movimientos = [];
+                let unsubscribers = [];
 
-        function escapeHtml(str) {
-            return (str ?? '').toString()
-                .replaceAll('&', '&amp;')
-                .replaceAll('<', '&lt;')
-                .replaceAll('>', '&gt;')
-                .replaceAll('"', '&quot;')
-                .replaceAll("'", '&#39;');
-        }
+                const STATUS_OPTIONS = [
+                    { value: 'para_ver', label: 'Para ir a ver' },
+                    { value: 'fui_ver', label: 'Fui a ver' },
+                    { value: 'no_va', label: 'No va' },
+                    { value: 'comuni', label: 'Comuni / Ofrecimiento' },
+                    { value: 'vendido', label: 'Se vendio' },
+                    { value: 'stock', label: 'Stock' }
+                ];
 
-        // --- Referencias a Colecciones ---
-        const getDealsRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'deals');
-        const getTransRef = (uid) => collection(db, 'artifacts', appId, 'users', uid, 'transactions');
-        const getUiSettingsRef = (uid) => doc(db, 'artifacts', appId, 'users', uid, 'settings', 'ui');
+                function safeJsonParse(val, fallback) {
+                    try {
+                        return JSON.parse(val);
+                    } catch {
+                        return fallback;
+                    }
+                }
 
-        function switchView(viewName) {
-            activeView = viewName;
-            const views = {
-                board: document.getElementById('view-board'),
-                clients: document.getElementById('view-clients'),
-                finances: document.getElementById('view-finances')
-            };
-            Object.keys(views).forEach(v => {
-                if (views[v]) views[v].classList.toggle('hidden', v !== viewName);
-            });
-            document.querySelectorAll('.nav-link').forEach(link => {
-                link.classList.toggle('bg-blue-700', link.dataset.view === viewName);
-            });
-            render();
-        }
+                function loadLocalState() {
+                    autos = safeJsonParse(localStorage.getItem(localKey('autos')) || '[]', []);
+                    senados = safeJsonParse(localStorage.getItem(localKey('senados')) || '[]', []);
+                    ventas = safeJsonParse(localStorage.getItem(localKey('ventas')) || '[]', []);
+                    pedidos = safeJsonParse(localStorage.getItem(localKey('pedidos')) || '[]', []);
+                    scanner = safeJsonParse(localStorage.getItem(localKey('scanner')) || '[]', []);
+                    movimientos = safeJsonParse(localStorage.getItem(localKey('movimientos')) || '[]', []);
+                }
 
-        // --- Mobile Menu (Drawer) ---
-        window.openMobileMenu = () => {
-            const drawer = document.getElementById('mobile-drawer');
-            if (!drawer) return;
-            drawer.classList.remove('hidden');
-            // Animate in
-            requestAnimationFrame(() => {
-                drawer.querySelector('[data-drawer-panel]')?.classList.remove('-translate-x-full');
-            });
-        };
+                function saveLocalState() {
+                    localStorage.setItem(localKey('autos'), JSON.stringify(autos));
+                    localStorage.setItem(localKey('senados'), JSON.stringify(senados));
+                    localStorage.setItem(localKey('ventas'), JSON.stringify(ventas));
+                    localStorage.setItem(localKey('pedidos'), JSON.stringify(pedidos));
+                    localStorage.setItem(localKey('scanner'), JSON.stringify(scanner));
+                    localStorage.setItem(localKey('movimientos'), JSON.stringify(movimientos));
+                }
 
-        window.closeMobileMenu = () => {
-            const drawer = document.getElementById('mobile-drawer');
-            if (!drawer) return;
-            drawer.querySelector('[data-drawer-panel]')?.classList.add('-translate-x-full');
-            setTimeout(() => drawer.classList.add('hidden'), 150);
-        };
+                function makeId(prefix) {
+                    if (typeof crypto !== 'undefined' && crypto.randomUUID) return `${prefix}_${crypto.randomUUID()}`;
+                    return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+                }
 
-        // --- Mobile Quick Add ---
-        window.openQuickAddMenu = () => {
-            const overlay = document.getElementById('quick-add-overlay');
-            if (!overlay) return;
-            overlay.classList.remove('hidden');
-        };
+                function escapeHtml(str) {
+                    return (str ?? '').toString()
+                        .replaceAll('&', '&amp;')
+                        .replaceAll('<', '&lt;')
+                        .replaceAll('>', '&gt;')
+                        .replaceAll('"', '&quot;')
+                        .replaceAll("'", '&#39;');
+                }
 
-        window.closeQuickAddMenu = () => {
-            const overlay = document.getElementById('quick-add-overlay');
-            if (!overlay) return;
-            overlay.classList.add('hidden');
-        };
+                function getCollectionRef(uid, name) {
+                    return collection(db, 'artifacts', appId, 'users', uid, name);
+                }
 
-        window.quickAddDeal = () => {
-            window.closeQuickAddMenu();
-            window.openNewDealForm();
-        };
+                function setAuthUiState(user) {
+                    const overlay = document.getElementById('auth-overlay');
+                    const userLabel = document.getElementById('auth-user-label');
+                    const logoutBtn = document.getElementById('auth-logout-btn');
 
-        window.quickAddTransaction = () => {
-            window.closeQuickAddMenu();
-            window.openNewTransactionForm();
-        };
+                    if (!firebaseEnabled) {
+                        overlay?.classList.add('hidden');
+                        if (userLabel) userLabel.textContent = '';
+                        logoutBtn?.classList.add('hidden');
+                        return;
+                    }
 
-        // --- Auth Implementation ---
-        function setAuthUiState(user) {
-            const overlay = document.getElementById('auth-overlay');
-            const userLabel = document.getElementById('auth-user-label');
-            const logoutBtn = document.getElementById('auth-logout-btn');
+                    if (user) {
+                        overlay?.classList.add('hidden');
+                        if (userLabel) userLabel.textContent = user.email || '(sin email)';
+                        logoutBtn?.classList.remove('hidden');
+                    } else {
+                        overlay?.classList.remove('hidden');
+                        if (userLabel) userLabel.textContent = '';
+                        logoutBtn?.classList.add('hidden');
+                    }
+                }
 
-            if (!firebaseEnabled) {
-                overlay?.classList.add('hidden');
-                if (userLabel) userLabel.textContent = '';
-                logoutBtn?.classList.add('hidden');
-                return;
-            }
+                function clearListeners() {
+                    unsubscribers.forEach((u) => {
+                        try { u(); } catch { /* no-op */ }
+                    });
+                    unsubscribers = [];
+                }
 
-            if (user) {
-                overlay?.classList.add('hidden');
-                if (userLabel) userLabel.textContent = user.email || '(sin email)';
-                logoutBtn?.classList.remove('hidden');
-            } else {
-                overlay?.classList.remove('hidden');
-                if (userLabel) userLabel.textContent = '';
-                logoutBtn?.classList.add('hidden');
-            }
-        }
-
-        function clearListeners() {
-            unsubscribers.forEach((u) => {
-                try { u(); } catch { /* no-op */ }
-            });
-            unsubscribers = [];
-        }
-
-        window.authLogin = async (e) => {
-            e?.preventDefault?.();
-            if (!firebaseEnabled || !auth) return;
-            const emailEl = document.getElementById('auth-email');
-            const passEl = document.getElementById('auth-password');
-            const email = (emailEl?.value || '').toString().trim();
-            const password = (passEl?.value || '').toString();
-            const msg = document.getElementById('auth-message');
-            if (msg) msg.textContent = '';
-
-            if (emailEl && !emailEl.checkValidity()) {
-                emailEl.reportValidity?.();
-                if (msg) msg.textContent = 'Ingresá un email válido.';
-                return;
-            }
-            if (!password) {
-                if (msg) msg.textContent = 'Ingresá tu contraseña.';
-                return;
-            }
-            try {
-                await signInWithEmailAndPassword(auth, email, password);
-            } catch (err) {
-                if (msg) msg.textContent = err?.message || 'Error de login';
-            }
-        };
-
-        window.authSignup = async () => {
-            if (!firebaseEnabled || !auth) return;
-            const emailEl = document.getElementById('auth-email');
-            const passEl = document.getElementById('auth-password');
-            const email = (emailEl?.value || '').toString().trim();
-            const password = (passEl?.value || '').toString();
-            const msg = document.getElementById('auth-message');
-            if (msg) msg.textContent = '';
-
-            if (emailEl && !emailEl.checkValidity()) {
-                emailEl.reportValidity?.();
-                if (msg) msg.textContent = 'Ingresá un email válido.';
-                return;
-            }
-            if (!password) {
-                if (msg) msg.textContent = 'Ingresá una contraseña.';
-                return;
-            }
-            if (password.length < 6) {
-                if (msg) msg.textContent = 'La contraseña debe tener al menos 6 caracteres.';
-                return;
-            }
-            try {
-                await createUserWithEmailAndPassword(auth, email, password);
-            } catch (err) {
-                if (msg) msg.textContent = err?.message || 'Error al crear cuenta';
-            }
-        };
-
-        window.authResetPassword = async () => {
-            if (!firebaseEnabled || !auth) return;
-            const emailEl = document.getElementById('auth-email');
-            const email = (emailEl?.value || '').toString().trim();
-            const msg = document.getElementById('auth-message');
-            if (msg) msg.textContent = '';
-            if (emailEl && !emailEl.checkValidity()) {
-                emailEl.reportValidity?.();
-                if (msg) msg.textContent = 'Ingresá un email válido para recuperar la contraseña.';
-                return;
-            }
-            try {
-                await sendPasswordResetEmail(auth, email);
-                if (msg) msg.textContent = 'Te enviamos un email para restablecer la contraseña.';
-            } catch (err) {
-                if (msg) msg.textContent = err?.message || 'Error al enviar email de recuperación';
-            }
-        };
-
-        window.authLogout = async () => {
-            if (!firebaseEnabled || !auth) return;
-            await signOut(auth);
-        };
-
-        if (firebaseEnabled && auth) {
-            onAuthStateChanged(auth, (user) => {
-                currentUser = user;
-                setAuthUiState(user);
-                if (user) setupListeners(user.uid);
-                else {
+                function setupListeners(uid) {
                     clearListeners();
-                    deals = [];
-                    transactions = [];
+                    const configs = [
+                        ['autos', (list) => autos = list],
+                        ['senados', (list) => senados = list],
+                        ['ventas', (list) => ventas = list],
+                        ['pedidos', (list) => pedidos = list],
+                        ['scanner', (list) => scanner = list],
+                        ['movimientos', (list) => movimientos = list]
+                    ];
+                    configs.forEach(([name, setter]) => {
+                        unsubscribers.push(onSnapshot(getCollectionRef(uid, name), (snapshot) => {
+                            setter(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+                            render();
+                        }));
+                    });
+                }
+
+                function switchView(viewName) {
+                    activeView = viewName;
+                    const views = {
+                        autos: document.getElementById('view-autos'),
+                        senados: document.getElementById('view-senados'),
+                        ventas: document.getElementById('view-ventas'),
+                        pedidos: document.getElementById('view-pedidos'),
+                        scanner: document.getElementById('view-scanner'),
+                        caja: document.getElementById('view-caja')
+                    };
+                    Object.keys(views).forEach(v => {
+                        if (views[v]) views[v].classList.toggle('hidden', v !== viewName);
+                    });
+                    document.querySelectorAll('.nav-link').forEach(link => {
+                        link.classList.toggle('bg-blue-700', link.dataset.view === viewName);
+                    });
                     render();
                 }
-            });
-        }
 
-        // --- Firestore Listeners ---
-        function setupListeners(uid) {
-            clearListeners();
-            unsubscribers.push(onSnapshot(getDealsRef(uid), (snapshot) => {
-                deals = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                render();
-            }, (err) => console.error("Deals Listener Error:", err)));
+                window.openMobileMenu = () => {
+                    const drawer = document.getElementById('mobile-drawer');
+                    if (!drawer) return;
+                    drawer.classList.remove('hidden');
+                    requestAnimationFrame(() => {
+                        drawer.querySelector('[data-drawer-panel]')?.classList.remove('-translate-x-full');
+                    });
+                };
 
-            unsubscribers.push(onSnapshot(getTransRef(uid), (snapshot) => {
-                transactions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                render();
-            }, (err) => console.error("Trans Listener Error:", err)));
+                window.closeMobileMenu = () => {
+                    const drawer = document.getElementById('mobile-drawer');
+                    if (!drawer) return;
+                    drawer.querySelector('[data-drawer-panel]')?.classList.add('-translate-x-full');
+                    setTimeout(() => drawer.classList.add('hidden'), 150);
+                };
 
-            unsubscribers.push(onSnapshot(getUiSettingsRef(uid), (snapshot) => {
-                if (snapshot.exists()) {
-                    const data = snapshot.data() || {};
-                    uiSettings = {
-                        ...uiSettings,
-                        ...(typeof data.boardTitle === 'string' ? { boardTitle: data.boardTitle } : {}),
-                        ...(typeof data.boardSubtitle === 'string' ? { boardSubtitle: data.boardSubtitle } : {}),
-                        ...(data.stageLabels && typeof data.stageLabels === 'object' ? { stageLabels: data.stageLabels } : {}),
-                        ...(Array.isArray(data.stages) ? { stages: data.stages } : {})
+                window.openQuickAddMenu = () => {
+                    const overlay = document.getElementById('quick-add-overlay');
+                    if (!overlay) return;
+                    overlay.classList.remove('hidden');
+                };
+
+                window.closeQuickAddMenu = () => {
+                    const overlay = document.getElementById('quick-add-overlay');
+                    if (!overlay) return;
+                    overlay.classList.add('hidden');
+                };
+
+                window.quickAddAuto = () => {
+                    window.closeQuickAddMenu();
+                    window.openNewAutoForm();
+                };
+
+                window.quickAddSenado = () => {
+                    window.closeQuickAddMenu();
+                    window.openNewSenadoForm();
+                };
+
+                window.quickAddVenta = () => {
+                    window.closeQuickAddMenu();
+                    window.openNewVentaForm();
+                };
+
+                window.quickAddPedido = () => {
+                    window.closeQuickAddMenu();
+                    window.openNewPedidoForm();
+                };
+
+                window.quickAddScanner = () => {
+                    window.closeQuickAddMenu();
+                    window.openNewScannerForm();
+                };
+
+                window.quickAddMovimiento = () => {
+                    window.closeQuickAddMenu();
+                    window.openNewMovimientoForm();
+                };
+
+                window.authLogin = async (e) => {
+                    e?.preventDefault?.();
+                    if (!firebaseEnabled || !auth) return;
+                    const emailEl = document.getElementById('auth-email');
+                    const passEl = document.getElementById('auth-password');
+                    const email = (emailEl?.value || '').toString().trim();
+                    const password = (passEl?.value || '').toString();
+                    const msg = document.getElementById('auth-message');
+                    if (msg) msg.textContent = '';
+
+                    if (emailEl && !emailEl.checkValidity()) {
+                        emailEl.reportValidity?.();
+                        if (msg) msg.textContent = 'Ingresa un email valido.';
+                        return;
+                    }
+                    if (!password) {
+                        if (msg) msg.textContent = 'Ingresa tu contrasena.';
+                        return;
+                    }
+                    try {
+                        await signInWithEmailAndPassword(auth, email, password);
+                    } catch (err) {
+                        if (msg) msg.textContent = err?.message || 'Error de login';
+                    }
+                };
+
+                window.authSignup = async () => {
+                    if (!firebaseEnabled || !auth) return;
+                    const emailEl = document.getElementById('auth-email');
+                    const passEl = document.getElementById('auth-password');
+                    const email = (emailEl?.value || '').toString().trim();
+                    const password = (passEl?.value || '').toString();
+                    const msg = document.getElementById('auth-message');
+                    if (msg) msg.textContent = '';
+
+                    if (emailEl && !emailEl.checkValidity()) {
+                        emailEl.reportValidity?.();
+                        if (msg) msg.textContent = 'Ingresa un email valido.';
+                        return;
+                    }
+                    if (!password) {
+                        if (msg) msg.textContent = 'Ingresa una contrasena.';
+                        return;
+                    }
+                    if (password.length < 6) {
+                        if (msg) msg.textContent = 'La contrasena debe tener al menos 6 caracteres.';
+                        return;
+                    }
+                    try {
+                        await createUserWithEmailAndPassword(auth, email, password);
+                    } catch (err) {
+                        if (msg) msg.textContent = err?.message || 'Error al crear cuenta';
+                    }
+                };
+
+                window.authResetPassword = async () => {
+                    if (!firebaseEnabled || !auth) return;
+                    const emailEl = document.getElementById('auth-email');
+                    const email = (emailEl?.value || '').toString().trim();
+                    const msg = document.getElementById('auth-message');
+                    if (msg) msg.textContent = '';
+                    if (emailEl && !emailEl.checkValidity()) {
+                        emailEl.reportValidity?.();
+                        if (msg) msg.textContent = 'Ingresa un email valido.';
+                        return;
+                    }
+                    try {
+                        await sendPasswordResetEmail(auth, email);
+                        if (msg) msg.textContent = 'Te enviamos un email para restablecer la contrasena.';
+                    } catch (err) {
+                        if (msg) msg.textContent = err?.message || 'Error al enviar email de recuperacion';
+                    }
+                };
+
+                window.authLogout = async () => {
+                    if (!firebaseEnabled || !auth) return;
+                    await signOut(auth);
+                };
+
+                if (firebaseEnabled && auth) {
+                    onAuthStateChanged(auth, (user) => {
+                        currentUser = user;
+                        setAuthUiState(user);
+                        if (user) setupListeners(user.uid);
+                        else {
+                            clearListeners();
+                            autos = [];
+                            senados = [];
+                            ventas = [];
+                            pedidos = [];
+                            scanner = [];
+                            movimientos = [];
+                            render();
+                        }
+                    });
+                }
+
+                function getStatusLabel(value) {
+                    return STATUS_OPTIONS.find(o => o.value === value)?.label || value || 'Sin estado';
+                }
+
+                function getAutoById(id) {
+                    return autos.find(a => a.id === id);
+                }
+
+                function normalizeNumber(val) {
+                    const num = parseFloat(val);
+                    return Number.isFinite(num) ? num : 0;
+                }
+
+                window.saveAuto = async (e) => {
+                    e.preventDefault();
+                    if (!currentUser) return;
+                    const formData = new FormData(e.target);
+                    const autoId = (formData.get('autoId') || '').toString().trim();
+                    const now = new Date().toISOString();
+                    const fallbackUnique = (formData.get('plate') || '').toString().trim();
+                    const uniqueCode = (formData.get('uniqueCode') || '').toString().trim() || fallbackUnique || makeId('auto');
+                    const payload = {
+                        uniqueCode,
+                        autoName: (formData.get('autoName') || '').toString().trim(),
+                        ownerName: (formData.get('ownerName') || '').toString().trim(),
+                        papers: (formData.get('papers') || '').toString().trim(),
+                        version: (formData.get('version') || '').toString().trim(),
+                        year: (formData.get('year') || '').toString().trim(),
+                        plate: (formData.get('plate') || '').toString().trim(),
+                        km: (formData.get('km') || '').toString().trim(),
+                        fuel: (formData.get('fuel') || '').toString().trim(),
+                        service: (formData.get('service') || '').toString().trim(),
+                        transmission: (formData.get('transmission') || '').toString().trim(),
+                        interior: (formData.get('interior') || '').toString().trim(),
+                        tires: (formData.get('tires') || '').toString().trim(),
+                        ac: (formData.get('ac') || '').toString().trim(),
+                        collision: (formData.get('collision') || '').toString().trim(),
+                        sellReason: (formData.get('sellReason') || '').toString().trim(),
+                        price: normalizeNumber(formData.get('price')),
+                        status: (formData.get('status') || '').toString().trim(),
+                        stockDate: (formData.get('stockDate') || '').toString().trim(),
+                        location: (formData.get('location') || '').toString().trim(),
+                        content: (formData.get('content') || '').toString().trim(),
+                        networks: (formData.get('networks') || '').toString().trim(),
+                        clientPrice: normalizeNumber(formData.get('clientPrice')),
+                        myPrice: normalizeNumber(formData.get('myPrice')),
+                        fines: (formData.get('fines') || '').toString().trim(),
+                        plateDebt: (formData.get('plateDebt') || '').toString().trim(),
+                        suats: (formData.get('suats') || '').toString().trim(),
+                        lowPrice: normalizeNumber(formData.get('lowPrice')),
+                        domainInfo: (formData.get('domainInfo') || '').toString().trim(),
+                        readyTransfer: (formData.get('readyTransfer') || '').toString().trim(),
+                        notes: (formData.get('notes') || '').toString().trim(),
+                        stockNotes: (formData.get('stockNotes') || '').toString().trim(),
+                        updatedAt: now
+                    };
+
+                    if (!firebaseEnabled) {
+                        if (autoId) {
+                            const idx = autos.findIndex(a => a.id === autoId);
+                            if (idx >= 0) autos[idx] = { ...autos[idx], ...payload };
+                        } else {
+                            autos.unshift({ id: makeId('auto'), createdAt: now, ...payload });
+                        }
+                        saveLocalState();
+                        render();
+                    } else {
+                        if (autoId) {
+                            await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'autos', autoId), payload);
+                        } else {
+                            await addDoc(getCollectionRef(currentUser.uid, 'autos'), { ...payload, createdAt: now });
+                        }
+                    }
+                    e.target.reset();
+                    closeModal('auto-modal');
+                };
+
+                window.deleteAuto = async (autoId) => {
+                    if (!currentUser) return;
+                    const id = (autoId || '').toString().trim();
+                    if (!id) return;
+                    const ok = window.confirm('Eliminar este auto?');
+                    if (!ok) return;
+                    if (!firebaseEnabled) {
+                        autos = autos.filter(a => a.id !== id);
+                        saveLocalState();
+                        render();
+                    } else {
+                        await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'autos', id));
+                    }
+                };
+
+                function makeCrudHandlers({ name, getList, setList }) {
+                    return {
+                        save: async (e) => {
+                            e.preventDefault();
+                            if (!currentUser) return;
+                            const formData = new FormData(e.target);
+                            const rowId = (formData.get('rowId') || '').toString().trim();
+                            const payload = Object.fromEntries(formData.entries());
+                            delete payload.rowId;
+                            const now = new Date().toISOString();
+                            payload.updatedAt = now;
+                            if (!firebaseEnabled) {
+                                const list = getList();
+                                let next = [];
+                                if (rowId) {
+                                    next = list.map(r => r.id === rowId ? { ...r, ...payload } : r);
+                                } else {
+                                    next = [{ id: makeId(name), createdAt: now, ...payload }, ...list];
+                                }
+                                setList(next);
+                                saveLocalState();
+                                render();
+                            } else {
+                                if (rowId) {
+                                    await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, name, rowId), payload);
+                                } else {
+                                    await addDoc(getCollectionRef(currentUser.uid, name), { ...payload, createdAt: now });
+                                }
+                            }
+                            e.target.reset();
+                            closeModal(`${name}-modal`);
+                        },
+                        del: async (rowId) => {
+                            if (!currentUser) return;
+                            const id = (rowId || '').toString().trim();
+                            if (!id) return;
+                            const ok = window.confirm('Eliminar este registro?');
+                            if (!ok) return;
+                            if (!firebaseEnabled) {
+                                const list = getList();
+                                const next = list.filter(r => r.id !== id);
+                                setList(next);
+                                saveLocalState();
+                                render();
+                            } else {
+                                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, name, id));
+                            }
+                        }
                     };
                 }
-                render();
-            }, (err) => console.error("UI Settings Listener Error:", err)));
-        }
 
-        // --- Acciones ---
-        window.saveDeal = async (e) => {
-            e.preventDefault();
-            if (!currentUser) return;
-            const formData = new FormData(e.target);
-            const dealId = (formData.get('dealId') || '').toString().trim();
-            const editableDealData = {
-                clientName: (formData.get('clientName') || '').toString().trim(),
-                clientEmail: (formData.get('clientEmail') || '').toString().trim(),
-                carModel: (formData.get('carModel') || '').toString().trim(),
-                carYear: (formData.get('carYear') || '').toString().trim(),
-                price: parseFloat(formData.get('price')) || 0,
-                location: (formData.get('location') || '').toString().trim(),
-                notes: (formData.get('notes') || '').toString().trim(),
-                reminder: (formData.get('reminder') || '').toString().trim(),
-                updatedAt: new Date().toISOString()
-            };
+                const senadoCrud = makeCrudHandlers({ name: 'senados', getList: () => senados, setList: (v) => { senados = v; } });
+                const ventaCrud = makeCrudHandlers({ name: 'ventas', getList: () => ventas, setList: (v) => { ventas = v; } });
+                const pedidoCrud = makeCrudHandlers({ name: 'pedidos', getList: () => pedidos, setList: (v) => { pedidos = v; } });
+                const scannerCrud = makeCrudHandlers({ name: 'scanner', getList: () => scanner, setList: (v) => { scanner = v; } });
+                const movimientoCrud = makeCrudHandlers({ name: 'movimientos', getList: () => movimientos, setList: (v) => { movimientos = v; } });
 
-            if (!firebaseEnabled) {
-                if (dealId) {
-                    const idx = deals.findIndex(d => d.id === dealId);
-                    if (idx >= 0) deals[idx] = { ...deals[idx], ...editableDealData };
-                } else {
-                    const firstStageId = (typeof getStages === 'function' ? (getStages()[0]?.id) : null) || 'visita_inicial';
-                    deals.unshift({
-                        id: makeId('deal'),
-                        ...editableDealData,
-                        status: firstStageId,
-                        stageNotes: [],
-                        createdAt: new Date().toISOString()
+                window.saveSenado = senadoCrud.save;
+                window.deleteSenado = senadoCrud.del;
+                window.saveVenta = ventaCrud.save;
+                window.deleteVenta = ventaCrud.del;
+                window.savePedido = pedidoCrud.save;
+                window.deletePedido = pedidoCrud.del;
+                window.saveScanner = scannerCrud.save;
+                window.deleteScanner = scannerCrud.del;
+                window.saveMovimiento = movimientoCrud.save;
+                window.deleteMovimiento = movimientoCrud.del;
+                window.deleteMovimientos = movimientoCrud.del;
+                window.deleteSenados = senadoCrud.del;
+                window.deleteVentas = ventaCrud.del;
+                window.deletePedidos = pedidoCrud.del;
+
+                window.openNewAutoForm = () => {
+                    const form = document.getElementById('auto-form');
+                    if (form) form.reset();
+                    document.getElementById('auto-id').value = '';
+                    document.getElementById('auto-modal-title').textContent = 'Nuevo Auto';
+                    openModal('auto-modal');
+                };
+
+                window.openEditAutoForm = (autoId) => {
+                    const auto = getAutoById(autoId);
+                    if (!auto) return;
+                    const form = document.getElementById('auto-form');
+                    if (!form) return;
+                    form.reset();
+                    document.getElementById('auto-id').value = auto.id;
+                    form.querySelector('[name="uniqueCode"]').value = auto.uniqueCode || '';
+                    form.querySelector('[name="autoName"]').value = auto.autoName || '';
+                    form.querySelector('[name="ownerName"]').value = auto.ownerName || '';
+                    form.querySelector('[name="papers"]').value = auto.papers || '';
+                    form.querySelector('[name="version"]').value = auto.version || '';
+                    form.querySelector('[name="year"]').value = auto.year || '';
+                    form.querySelector('[name="plate"]').value = auto.plate || '';
+                    form.querySelector('[name="km"]').value = auto.km || '';
+                    form.querySelector('[name="fuel"]').value = auto.fuel || '';
+                    form.querySelector('[name="service"]').value = auto.service || '';
+                    form.querySelector('[name="transmission"]').value = auto.transmission || '';
+                    form.querySelector('[name="interior"]').value = auto.interior || '';
+                    form.querySelector('[name="tires"]').value = auto.tires || '';
+                    form.querySelector('[name="ac"]').value = auto.ac || '';
+                    form.querySelector('[name="collision"]').value = auto.collision || '';
+                    form.querySelector('[name="sellReason"]').value = auto.sellReason || '';
+                    form.querySelector('[name="price"]').value = auto.price ?? '';
+                    form.querySelector('[name="status"]').value = auto.status || '';
+                    form.querySelector('[name="stockDate"]').value = auto.stockDate || '';
+                    form.querySelector('[name="location"]').value = auto.location || '';
+                    form.querySelector('[name="content"]').value = auto.content || '';
+                    form.querySelector('[name="networks"]').value = auto.networks || '';
+                    form.querySelector('[name="clientPrice"]').value = auto.clientPrice ?? '';
+                    form.querySelector('[name="myPrice"]').value = auto.myPrice ?? '';
+                    form.querySelector('[name="fines"]').value = auto.fines || '';
+                    form.querySelector('[name="plateDebt"]').value = auto.plateDebt || '';
+                    form.querySelector('[name="suats"]').value = auto.suats || '';
+                    form.querySelector('[name="lowPrice"]').value = auto.lowPrice ?? '';
+                    form.querySelector('[name="domainInfo"]').value = auto.domainInfo || '';
+                    form.querySelector('[name="readyTransfer"]').value = auto.readyTransfer || '';
+                    form.querySelector('[name="notes"]').value = auto.notes || '';
+                    form.querySelector('[name="stockNotes"]').value = auto.stockNotes || '';
+                    document.getElementById('auto-modal-title').textContent = 'Editar Auto';
+                    openModal('auto-modal');
+                };
+
+                function openSimpleModal(name) {
+                    const form = document.getElementById(`${name}-form`);
+                    if (form) form.reset();
+                    const rowId = form?.querySelector('[name="rowId"]');
+                    if (rowId) rowId.value = '';
+                    openModal(`${name}-modal`);
+                }
+
+                window.openNewSenadoForm = () => openSimpleModal('senados');
+                window.openNewVentaForm = () => openSimpleModal('ventas');
+                window.openNewPedidoForm = () => openSimpleModal('pedidos');
+                window.openNewScannerForm = () => openSimpleModal('scanner');
+                window.openNewMovimientoForm = () => openSimpleModal('movimientos');
+
+                window.openEditSimpleForm = (name, rowId) => {
+                    const list = { senados, ventas, pedidos, scanner, movimientos }[name] || [];
+                    const row = list.find(r => r.id === rowId);
+                    if (!row) return;
+                    const form = document.getElementById(`${name}-form`);
+                    if (!form) return;
+                    form.reset();
+                    form.querySelector('[name="rowId"]').value = row.id;
+                    Object.keys(row).forEach((key) => {
+                        if (key === 'id') return;
+                        const field = form.querySelector(`[name="${key}"]`);
+                        if (field) field.value = row[key] ?? '';
                     });
-                }
-                saveLocalState();
-                render();
-            } else {
-                if (dealId) {
-                    await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', dealId), editableDealData);
-                } else {
-                    const firstStageId = (typeof getStages === 'function' ? (getStages()[0]?.id) : null) || 'visita_inicial';
-                    await addDoc(getDealsRef(currentUser.uid), {
-                        ...editableDealData,
-                        status: firstStageId,
-                        stageNotes: [],
-                        createdAt: new Date().toISOString()
+                    openModal(`${name}-modal`);
+                };
+
+                function renderAutos() {
+                    const container = document.getElementById('autos-grid');
+                    const searchVal = document.getElementById('auto-search')?.value.toLowerCase() || '';
+                    const statusVal = document.getElementById('auto-status-filter')?.value || '';
+                    const filtered = autos.filter(a => {
+                        const haystack = `${a.autoName || ''} ${a.ownerName || ''} ${a.plate || ''} ${a.uniqueCode || ''}`.toLowerCase();
+                        const matchesSearch = !searchVal || haystack.includes(searchVal);
+                        const matchesStatus = !statusVal || a.status === statusVal;
+                        return matchesSearch && matchesStatus;
                     });
-                }
-            }
-            e.target.reset();
-            closeModal('deal-modal');
-        };
 
-        window.deleteDeal = async (dealId) => {
-            if (!currentUser) return;
-            const id = (dealId || '').toString().trim();
-            if (!id) return;
-            const ok = window.confirm('¿Eliminar esta operación y TODOS sus movimientos? Esta acción no se puede deshacer.');
-            if (!ok) return;
-
-            if (!firebaseEnabled) {
-                deals = deals.filter(d => d.id !== id);
-                transactions = transactions.filter(t => t.dealId !== id);
-                saveLocalState();
-                render();
-            } else {
-                const batch = writeBatch(db);
-                const dealDocRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', id);
-                batch.delete(dealDocRef);
-
-                const transQuery = query(getTransRef(currentUser.uid), where('dealId', '==', id));
-                const transSnap = await getDocs(transQuery);
-                transSnap.forEach((t) => {
-                    batch.delete(t.ref);
-                });
-
-                await batch.commit();
-            }
-            closeModal('detail-modal');
-        };
-
-        window.addStageNote = async (dealId) => {
-            if (!currentUser) return;
-            const id = (dealId || '').toString().trim();
-            if (!id) return;
-            const deal = deals.find(d => d.id === id);
-            if (!deal) return;
-
-            const input = document.getElementById('stage-note-input');
-            const text = (input?.value || '').toString().trim();
-            if (!text) return;
-
-            const note = {
-                id: makeId('note'),
-                stageId: deal.status,
-                text,
-                createdAt: new Date().toISOString()
-            };
-
-            if (!firebaseEnabled) {
-                const idx = deals.findIndex(d => d.id === id);
-                if (idx >= 0) {
-                    const existing = Array.isArray(deals[idx].stageNotes) ? deals[idx].stageNotes : [];
-                    deals[idx] = { ...deals[idx], stageNotes: [note, ...existing], updatedAt: new Date().toISOString() };
-                }
-                saveLocalState();
-                if (input) input.value = '';
-                window.openDealDetails(id);
-                render();
-            } else {
-                await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', id), {
-                    stageNotes: arrayUnion(note),
-                    updatedAt: new Date().toISOString()
-                });
-                if (input) input.value = '';
-                window.openDealDetails(id);
-            }
-        };
-
-        window.updateStatus = async (id, newStatus) => {
-            if (!currentUser) return;
-            if (!firebaseEnabled) {
-                const idx = deals.findIndex(d => d.id === id);
-                if (idx >= 0) deals[idx] = { ...deals[idx], status: newStatus, updatedAt: new Date().toISOString() };
-                saveLocalState();
-                render();
-            } else {
-                await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'deals', id), {
-                    status: newStatus
-                });
-            }
-        };
-
-        // --- Drag & Drop (Kanban) ---
-        window.isDragging = false;
-        window.draggingDealId = null;
-
-        window.onDragStartDeal = (e, dealId) => {
-            window.isDragging = true;
-            window.draggingDealId = dealId;
-            try {
-                e.dataTransfer.effectAllowed = 'move';
-                e.dataTransfer.setData('text/plain', dealId);
-            } catch {
-                // no-op
-            }
-        };
-
-        window.onDragEndDeal = () => {
-            // Slight delay so a click isn't triggered right after drop
-            setTimeout(() => {
-                window.isDragging = false;
-                window.draggingDealId = null;
-            }, 0);
-            document.querySelectorAll('[data-dropzone="1"]').forEach(el => {
-                el.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
-            });
-        };
-
-        window.onDragOverStage = (e) => {
-            e.preventDefault();
-            if (!e.currentTarget) return;
-            e.currentTarget.classList.add('ring-2', 'ring-blue-400', 'bg-blue-50');
-        };
-
-        window.onDragLeaveStage = (e) => {
-            if (!e.currentTarget) return;
-            e.currentTarget.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
-        };
-
-        window.onDropDealToStage = async (e, stageId) => {
-            e.preventDefault();
-            const target = e.currentTarget;
-            if (target) target.classList.remove('ring-2', 'ring-blue-400', 'bg-blue-50');
-
-            let dealId = '';
-            try {
-                dealId = (e.dataTransfer.getData('text/plain') || '').toString();
-            } catch {
-                dealId = (window.draggingDealId || '').toString();
-            }
-            dealId = dealId.trim();
-            if (!dealId) return;
-            if (!stageId) return;
-            await window.updateStatus(dealId, stageId);
-        };
-
-        window.addTransaction = async (e) => {
-            e.preventDefault();
-            if (!currentUser) return;
-            const formData = new FormData(e.target);
-            const transId = (formData.get('transactionId') || '').toString().trim();
-            const editableTransData = {
-                dealId: (formData.get('dealId') || '').toString(),
-                type: (formData.get('type') || 'expense').toString(),
-                category: (formData.get('category') || '').toString().trim(),
-                amount: parseFloat(formData.get('amount')),
-                description: (formData.get('description') || '').toString().trim(),
-                updatedAt: new Date().toISOString()
-            };
-
-            if (!firebaseEnabled) {
-                if (transId) {
-                    const idx = transactions.findIndex(t => t.id === transId);
-                    if (idx >= 0) transactions[idx] = { ...transactions[idx], ...editableTransData };
-                } else {
-                    transactions.unshift({
-                        id: makeId('trans'),
-                        ...editableTransData,
-                        date: new Date().toISOString()
-                    });
-                }
-                saveLocalState();
-                render();
-            } else {
-                if (transId) {
-                    await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', transId), editableTransData);
-                } else {
-                    await addDoc(getTransRef(currentUser.uid), {
-                        ...editableTransData,
-                        date: new Date().toISOString()
-                    });
-                }
-            }
-            e.target.reset();
-            closeModal('finance-modal');
-        };
-
-        window.deleteTransaction = async (transId) => {
-            if (!currentUser) return;
-            const id = (transId || '').toString().trim();
-            if (!id) return;
-            const ok = window.confirm('¿Eliminar este movimiento?');
-            if (!ok) return;
-            if (!firebaseEnabled) {
-                transactions = transactions.filter(t => t.id !== id);
-                saveLocalState();
-                render();
-            } else {
-                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions', id));
-            }
-        };
-
-        window.saveBoardTitles = async () => {
-            if (!currentUser) return;
-            const title = (document.getElementById('board-title-input')?.value || '').toString().trim();
-            const subtitle = (document.getElementById('board-subtitle-input')?.value || '').toString().trim();
-            uiSettings = {
-                ...uiSettings,
-                boardTitle: title || uiSettings.boardTitle,
-                boardSubtitle: subtitle || uiSettings.boardSubtitle
-            };
-            if (!firebaseEnabled) {
-                saveLocalState();
-                render();
-            } else {
-                await setDoc(getUiSettingsRef(currentUser.uid), {
-                    boardTitle: uiSettings.boardTitle,
-                    boardSubtitle: uiSettings.boardSubtitle,
-                    updatedAt: new Date().toISOString()
-                }, { merge: true });
-            }
-            window.cancelEditBoardTitles();
-        };
-
-        window.startEditStageTitles = () => {
-            const COLOR_OPTIONS = [
-                { label: 'Gris', value: 'border-slate-400' },
-                { label: 'Azul', value: 'border-sky-500' },
-                { label: 'Amarillo', value: 'border-amber-500' },
-                { label: 'Violeta', value: 'border-violet-500' },
-                { label: 'Naranja', value: 'border-orange-600' },
-                { label: 'Verde', value: 'border-emerald-600' },
-                { label: 'Rojo', value: 'border-red-600' }
-            ];
-
-            function slugifyLabel(label) {
-                return (label || '')
-                    .toString()
-                    .trim()
-                    .toLowerCase()
-                    .normalize('NFD')
-                    .replace(/[\u0300-\u036f]/g, '')
-                    .replace(/[^a-z0-9]+/g, '_')
-                    .replace(/^_+|_+$/g, '') || 'etapa';
-            }
-
-            function renderStageEditor() {
-                const container = document.getElementById('stage-labels-editor');
-                if (!container) return;
-                const stages = Array.isArray(window.stageDraft) && window.stageDraft.length ? window.stageDraft : [];
-                container.innerHTML = stages.map(stage => {
-                    const options = COLOR_OPTIONS.map(o => `<option value="${o.value}" ${o.value === stage.color ? 'selected' : ''}>${o.label}</option>`).join('');
-                    const safeLabel = (stage.label || '').toString().replaceAll('"', '&quot;');
-                    return `
-                        <div class="grid grid-cols-1 md:grid-cols-5 gap-2 items-center border-b last:border-b-0 py-2">
-                            <div class="md:col-span-2">
-                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Nombre</label>
-                                <input type="text" class="w-full p-2 border rounded" data-stage-id="${stage.id}" data-field="label" value="${safeLabel}" />
+                    container.innerHTML = filtered.map(a => `
+                        <div class="bg-white border rounded-2xl p-4 shadow-sm hover:shadow-md transition">
+                            <div class="flex items-start justify-between gap-3">
+                                <div>
+                                    <div class="text-xs text-gray-500 font-bold mb-1">${escapeHtml(a.uniqueCode || 'AUTO')}</div>
+                                    <div class="text-lg font-bold">${escapeHtml(a.autoName || 'Sin modelo')}</div>
+                                    <div class="text-sm text-gray-600">${escapeHtml(a.year || '')} ${a.plate ? '• ' + escapeHtml(a.plate) : ''}</div>
+                                </div>
+                                <span class="text-xs px-3 py-1 rounded-full bg-blue-50 text-blue-700 font-semibold">${escapeHtml(getStatusLabel(a.status))}</span>
                             </div>
-                            <div class="md:col-span-2">
-                                <label class="block text-xs font-bold text-gray-400 uppercase mb-1">Color</label>
-                                <select class="w-full p-2 border rounded" data-stage-id="${stage.id}" data-field="color">${options}</select>
+                            <div class="mt-3 grid grid-cols-2 gap-2 text-sm">
+                                <div>
+                                    <div class="text-xs text-gray-500">Ubicacion</div>
+                                    <div class="font-semibold">${escapeHtml(a.location || '-')}</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs text-gray-500">Precio</div>
+                                    <div class="font-semibold">$${(a.price || 0).toLocaleString()}</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs text-gray-500">Mi precio</div>
+                                    <div class="font-semibold">$${(a.myPrice || 0).toLocaleString()}</div>
+                                </div>
+                                <div>
+                                    <div class="text-xs text-gray-500">Cliente</div>
+                                    <div class="font-semibold">${escapeHtml(a.ownerName || '-')}</div>
+                                </div>
                             </div>
-                            <div class="md:col-span-1 md:pt-6 flex md:justify-end">
-                                <button class="text-sm text-red-600 hover:underline" onclick="removeStageDraft('${stage.id}')">Eliminar</button>
+                            <div class="mt-4 flex gap-2">
+                                <button class="text-sm text-blue-600 hover:underline" onclick="openEditAutoForm('${a.id}')">Editar</button>
+                                <button class="text-sm text-red-600 hover:underline" onclick="deleteAuto('${a.id}')">Eliminar</button>
                             </div>
                         </div>
-                    `;
-                }).join('');
-            }
-
-            window.addStageDraft = () => {
-                const labelInput = document.getElementById('new-stage-label');
-                const colorSelect = document.getElementById('new-stage-color');
-                const label = (labelInput?.value || '').toString().trim();
-                const color = (colorSelect?.value || 'border-slate-400').toString();
-                if (!label) return;
-                const baseId = slugifyLabel(label);
-                const draft = Array.isArray(window.stageDraft) ? window.stageDraft : [];
-                let candidate = baseId;
-                let n = 2;
-                while (draft.some(s => s.id === candidate)) {
-                    candidate = `${baseId}_${n++}`;
+                    `).join('');
                 }
-                draft.push({ id: candidate, label, color });
-                window.stageDraft = draft;
-                if (labelInput) labelInput.value = '';
-                renderStageEditor();
-            };
 
-            window.removeStageDraft = (stageId) => {
-                const draft = Array.isArray(window.stageDraft) ? window.stageDraft : [];
-                if (draft.length <= 1) {
-                    alert('Debe existir al menos una columna.');
-                    return;
+                function renderTable(list, tbodyId, columns, emptyLabel) {
+                    const tbody = document.getElementById(tbodyId);
+                    tbody.innerHTML = list.length ? list.map(row => `
+                        <tr class="border-b hover:bg-gray-50">
+                            ${columns.map(col => `<td class="p-3 text-sm">${escapeHtml(row[col] || '')}</td>`).join('')}
+                            <td class="p-3 text-right">
+                                <button class="text-xs text-blue-600 hover:underline" onclick="openEditSimpleForm('${tbody.dataset.name}', '${row.id}')">Editar</button>
+                                <button class="text-xs text-red-600 hover:underline ml-2" onclick="delete${tbody.dataset.name.charAt(0).toUpperCase() + tbody.dataset.name.slice(1)}('${row.id}')">Eliminar</button>
+                            </td>
+                        </tr>
+                    `).join('') : `<tr><td class="p-3 text-sm text-gray-400" colspan="${columns.length + 1}">${emptyLabel}</td></tr>`;
                 }
-                const stage = draft.find(s => s.id === stageId);
-                const label = stage?.label || stageId;
-                const ok = window.confirm(`¿Eliminar la columna "${label}"?\n\nLos autos en esa columna se moverán a la primera columna al guardar.`);
-                if (!ok) return;
-                window.stageDraft = draft.filter(s => s.id !== stageId);
-                renderStageEditor();
-            };
 
-            // init draft from effective stages
-            window.stageDraft = getStages().map(s => ({
-                id: s.id,
-                label: (uiSettings.stageLabels?.[s.id] || s.label || '').toString(),
-                color: (s.color || 'border-slate-400').toString()
-            }));
-            renderStageEditor();
-            document.getElementById('stage-titles-editor')?.classList.remove('hidden');
-        };
+                function renderSenados() {
+                    renderTable(senados, 'senados-table-body', ['auto', 'precioVenta', 'patente', 'vendedor', 'senaTurno', 'diaTransfer', 'comprador'], 'Sin senas cargadas');
+                }
 
-        window.cancelEditStageTitles = () => {
-            document.getElementById('stage-titles-editor')?.classList.add('hidden');
-            window.stageDraft = null;
+                function renderVentas() {
+                    renderTable(ventas, 'ventas-table-body', ['cliente', 'presupuesto', 'auto', 'precio', 'vendedor', 'ganancia', 'fecha'], 'Sin ventas externas');
+                }
+
+                function renderPedidos() {
+                    renderTable(pedidos, 'pedidos-table-body', ['nombreAuto', 'presupuesto', 'auto', 'ubicacion', 'precioBajo', 'notas'], 'Sin pedidos');
+                }
+
+                function renderScanner() {
+                    renderTable(scanner, 'scanner-table-body', ['dia', 'auto', 'clienteNumero', 'tipo', 'ubicacion', 'borreFallas', 'ganancias'], 'Sin registros de scanner');
+                }
+
+                function renderCaja() {
+                    const total = movimientos.reduce((acc, m) => {
+                        const amount = normalizeNumber(m.monto);
+                        return m.tipo === 'gasto' ? acc - amount : acc + amount;
+                    }, 0);
+                    document.getElementById('caja-total').textContent = `$${total.toLocaleString()}`;
+                    renderTable(movimientos, 'caja-table-body', ['fecha', 'tipo', 'monto', 'categoria', 'descripcion', 'auto'], 'Sin movimientos');
+                }
+
+                function render() {
+                    if (activeView === 'autos') renderAutos();
+                    if (activeView === 'senados') renderSenados();
+                    if (activeView === 'ventas') renderVentas();
+                    if (activeView === 'pedidos') renderPedidos();
+                    if (activeView === 'scanner') renderScanner();
+                    if (activeView === 'caja') renderCaja();
+                }
+
+                window.openModal = (id) => document.getElementById(id).classList.remove('hidden');
+                window.closeModal = (id) => document.getElementById(id).classList.add('hidden');
+
+                window.addEventListener('DOMContentLoaded', () => {
+                    if (!firebaseEnabled) {
+                        currentUser = { uid: LOCAL_UID };
+                        loadLocalState();
+                        render();
+                    }
+                    setAuthUiState(currentUser);
+
+                    document.querySelectorAll('.nav-link').forEach(link => {
+                        link.addEventListener('click', () => {
+                            switchView(link.dataset.view);
+                            window.closeMobileMenu?.();
+                        });
+                    });
+
+                    document.getElementById('auto-search')?.addEventListener('input', renderAutos);
+                    document.getElementById('auto-status-filter')?.addEventListener('change', renderAutos);
+                });
+            </script>
+            <style>
+                .custom-scroll::-webkit-scrollbar { height: 8px; width: 8px; }
+                .custom-scroll::-webkit-scrollbar-track { background: transparent; }
+                .custom-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+                .custom-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+            </style>
+        </head>
+        <body class="bg-gray-50 text-gray-900 h-screen flex flex-col overflow-hidden">
+            <header class="bg-blue-900 text-white p-4 shadow-lg flex justify-between items-center shrink-0">
+                <div class="flex items-center gap-3">
+                    <button onclick="openMobileMenu()" class="md:hidden bg-blue-950/40 hover:bg-blue-950/60 p-2 rounded-lg" aria-label="Abrir menu">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+                        </svg>
+                    </button>
+                    <div class="bg-white text-blue-900 p-2 rounded-lg font-black text-xl">AM</div>
+                    <h1 class="text-xl font-bold tracking-tight">AutoManager <span class="text-blue-300 font-normal">Inventario</span></h1>
+                </div>
+                <div class="flex flex-wrap items-center justify-end gap-2">
+                    <div class="hidden md:block text-xs text-blue-200">
+                        <span id="auth-user-label"></span>
+                    </div>
+                    <button id="auth-logout-btn" onclick="authLogout()" class="hidden bg-blue-950/40 hover:bg-blue-950/60 px-3 py-2 rounded-lg text-sm font-semibold transition">Salir</button>
+                    <button onclick="openQuickAddMenu()" class="md:hidden bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg text-sm font-semibold transition shadow-md" aria-label="Agregar">+</button>
+                    <button onclick="openNewAutoForm()" class="hidden md:inline-flex bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg text-sm font-semibold transition shadow-md">+ Nuevo Auto</button>
+                    <button onclick="openNewMovimientoForm()" class="hidden md:inline-flex bg-green-600 hover:bg-green-500 px-4 py-2 rounded-lg text-sm font-semibold transition shadow-md">+ Movimiento</button>
+                </div>
+            </header>
+
+            <div id="quick-add-overlay" class="fixed inset-0 hidden z-[56]">
+                <div class="absolute inset-0 bg-black/20" onclick="closeQuickAddMenu()"></div>
+                <div class="absolute right-4 top-20 bg-white rounded-xl shadow-lg border overflow-hidden w-60">
+                    <button onclick="quickAddAuto()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold">Nuevo Auto</button>
+                    <button onclick="quickAddSenado()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Senado</button>
+                    <button onclick="quickAddVenta()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Venta externa</button>
+                    <button onclick="quickAddPedido()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Pedido</button>
+                    <button onclick="quickAddScanner()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Scanner</button>
+                    <button onclick="quickAddMovimiento()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Movimiento</button>
+                </div>
+            </div>
+
+            <div id="mobile-drawer" class="fixed inset-0 hidden z-[55]">
+                <div class="absolute inset-0 bg-black/40" onclick="closeMobileMenu()"></div>
+                <div data-drawer-panel class="absolute left-0 top-0 bottom-0 w-72 bg-blue-800 text-white transform -translate-x-full transition-transform duration-150 flex flex-col">
+                    <div class="p-4 border-b border-blue-700 flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <div class="bg-white text-blue-900 p-2 rounded-lg font-black text-lg">AM</div>
+                            <div class="font-bold">Menu</div>
+                        </div>
+                        <button onclick="closeMobileMenu()" class="text-blue-200 hover:text-white" aria-label="Cerrar menu">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                        </button>
+                    </div>
+                    <nav class="mt-4 flex-1 px-4 space-y-2">
+                        <button data-view="autos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">Autos</button>
+                        <button data-view="senados" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Senados</button>
+                        <button data-view="ventas" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Ventas externas</button>
+                        <button data-view="pedidos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Pedidos</button>
+                        <button data-view="scanner" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Scanner</button>
+                        <button data-view="caja" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Caja</button>
+                    </nav>
+                    <div class="p-4 text-xs text-blue-200 border-t border-blue-700">&copy; 2024 Vendedores de Elite</div>
+                </div>
+            </div>
+
+            <div class="flex flex-1 overflow-hidden">
+                <aside class="w-64 bg-blue-800 text-white flex flex-col hidden md:flex shrink-0">
+                    <nav class="mt-6 flex-1 px-4 space-y-2">
+                        <button data-view="autos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">Autos</button>
+                        <button data-view="senados" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Senados</button>
+                        <button data-view="ventas" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Ventas externas</button>
+                        <button data-view="pedidos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Pedidos</button>
+                        <button data-view="scanner" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Scanner</button>
+                        <button data-view="caja" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Caja</button>
+                    </nav>
+                    <div class="p-4 text-xs text-blue-300 border-t border-blue-700">&copy; 2024 Vendedores de Elite</div>
+                </aside>
+
+                <main class="flex-1 overflow-hidden flex flex-col p-6">
+                    <div id="view-autos" class="h-full flex flex-col">
+                        <div class="mb-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                            <div>
+                                <h2 class="text-2xl font-bold text-gray-800">Inventario de Autos</h2>
+                                <p class="text-gray-500 text-sm">Base unica con estado y detalles.</p>
+                            </div>
+                            <div class="flex gap-3">
+                                <input type="text" id="auto-search" placeholder="Buscar por auto, cliente, patente..." class="w-64 p-2 border rounded-lg shadow-sm">
+                                <select id="auto-status-filter" class="w-48 p-2 border rounded-lg shadow-sm">
+                                    <option value="">Todos los estados</option>
+                                    <option value="para_ver">Para ir a ver</option>
+                                    <option value="fui_ver">Fui a ver</option>
+                                    <option value="no_va">No va</option>
+                                    <option value="comuni">Comuni / Ofrecimiento</option>
+                                    <option value="vendido">Se vendio</option>
+                                    <option value="stock">Stock</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="autos-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 overflow-y-auto custom-scroll pb-4"></div>
+                    </div>
+
+                    <div id="view-senados" class="hidden h-full flex flex-col">
+                        <div class="mb-4 flex items-center justify-between">
+                            <div>
+                                <h2 class="text-2xl font-bold text-gray-800">Senados</h2>
+                                <p class="text-gray-500 text-sm">Operaciones con sena y transferencia.</p>
+                            </div>
+                            <button onclick="openNewSenadoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo</button>
+                        </div>
+                        <div class="flex-1 bg-white rounded-xl shadow-sm overflow-hidden border">
+                            <div class="overflow-y-auto max-h-full">
+                                <table class="w-full text-left border-collapse">
+                                    <thead class="bg-gray-50 sticky top-0">
+                                        <tr>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Auto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Precio venta</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Patente</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Vendedor</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Sena</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Transferencia</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Comprador</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="senados-table-body" data-name="senados"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="view-ventas" class="hidden h-full flex flex-col">
+                        <div class="mb-4 flex items-center justify-between">
+                            <div>
+                                <h2 class="text-2xl font-bold text-gray-800">Ventas externas</h2>
+                                <p class="text-gray-500 text-sm">Ventas fuera del stock.</p>
+                            </div>
+                            <button onclick="openNewVentaForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo</button>
+                        </div>
+                        <div class="flex-1 bg-white rounded-xl shadow-sm overflow-hidden border">
+                            <div class="overflow-y-auto max-h-full">
+                                <table class="w-full text-left border-collapse">
+                                    <thead class="bg-gray-50 sticky top-0">
+                                        <tr>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Cliente</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Presupuesto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Auto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Precio</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Vendedor</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ganancia</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Fecha</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="ventas-table-body" data-name="ventas"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="view-pedidos" class="hidden h-full flex flex-col">
+                        <div class="mb-4 flex items-center justify-between">
+                            <div>
+                                <h2 class="text-2xl font-bold text-gray-800">Pedidos</h2>
+                                <p class="text-gray-500 text-sm">Pedidos de clientes para buscar.</p>
+                            </div>
+                            <button onclick="openNewPedidoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo</button>
+                        </div>
+                        <div class="flex-1 bg-white rounded-xl shadow-sm overflow-hidden border">
+                            <div class="overflow-y-auto max-h-full">
+                                <table class="w-full text-left border-collapse">
+                                    <thead class="bg-gray-50 sticky top-0">
+                                        <tr>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Nombre/Auto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Presupuesto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Auto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ubicacion</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Precio bajo</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Notas</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="pedidos-table-body" data-name="pedidos"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="view-scanner" class="hidden h-full flex flex-col">
+                        <div class="mb-4 flex items-center justify-between">
+                            <div>
+                                <h2 class="text-2xl font-bold text-gray-800">Scanner</h2>
+                                <p class="text-gray-500 text-sm">Servicios de scanner y ganancias.</p>
+                            </div>
+                            <button onclick="openNewScannerForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo</button>
+                        </div>
+                        <div class="flex-1 bg-white rounded-xl shadow-sm overflow-hidden border">
+                            <div class="overflow-y-auto max-h-full">
+                                <table class="w-full text-left border-collapse">
+                                    <thead class="bg-gray-50 sticky top-0">
+                                        <tr>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Dia</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Auto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Cliente/Numero</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Tipo</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ubicacion</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Borre fallas</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ganancias</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="scanner-table-body" data-name="scanner"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="view-caja" class="hidden h-full flex flex-col">
+                        <div class="mb-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                            <div>
+                                <h2 class="text-2xl font-bold text-gray-800">Caja</h2>
+                                <p class="text-gray-500 text-sm">Ingresos y gastos generales.</p>
+                            </div>
+                            <div class="bg-white p-4 rounded-xl shadow-sm border flex items-center gap-4">
+                                <span class="text-gray-500 font-semibold uppercase text-xs">Balance Neto:</span>
+                                <span id="caja-total" class="text-3xl font-black text-blue-700">$0</span>
+                            </div>
+                        </div>
+                        <div class="flex-1 bg-white rounded-xl shadow-sm overflow-hidden border">
+                            <div class="overflow-y-auto max-h-full">
+                                <table class="w-full text-left border-collapse">
+                                    <thead class="bg-gray-50 sticky top-0">
+                                        <tr>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Fecha</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Tipo</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Monto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Categoria</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Descripcion</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Auto</th>
+                                            <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="caja-table-body" data-name="movimientos"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </main>
+            </div>
+
+            <div id="auto-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+                <div class="bg-white rounded-2xl w-full max-w-3xl overflow-hidden">
+                    <div class="p-6 border-b">
+                        <h3 id="auto-modal-title" class="text-xl font-bold">Nuevo Auto</h3>
+                    </div>
+                    <div class="p-6">
+                        <form id="auto-form" onsubmit="saveAuto(event)" class="space-y-4">
+                            <input type="hidden" name="autoId" id="auto-id" value="">
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">ID Unico</label>
+                                    <input type="text" name="uniqueCode" placeholder="Ej: PATENTE o ID" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Auto</label>
+                                    <input type="text" name="autoName" required class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Nombre</label>
+                                    <input type="text" name="ownerName" class="w-full p-2 border rounded">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Papers/VTV</label>
+                                    <input type="text" name="papers" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Version</label>
+                                    <input type="text" name="version" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Ano</label>
+                                    <input type="text" name="year" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Patente</label>
+                                    <input type="text" name="plate" class="w-full p-2 border rounded">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">KM</label>
+                                    <input type="text" name="km" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Nafta</label>
+                                    <input type="text" name="fuel" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Service/Distrib</label>
+                                    <input type="text" name="service" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Man/AT</label>
+                                    <input type="text" name="transmission" class="w-full p-2 border rounded">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Interior</label>
+                                    <input type="text" name="interior" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Cubiertas</label>
+                                    <input type="text" name="tires" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Aire</label>
+                                    <input type="text" name="ac" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Choque</label>
+                                    <input type="text" name="collision" class="w-full p-2 border rounded">
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Por que lo vendes</label>
+                                    <input type="text" name="sellReason" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Precio</label>
+                                    <input type="number" name="price" class="w-full p-2 border rounded">
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Estado</label>
+                                    <select name="status" class="w-full p-2 border rounded">
+                                        <option value="">Selecciona estado</option>
+                                        <option value="para_ver">Para ir a ver</option>
+                                        <option value="fui_ver">Fui a ver</option>
+                                        <option value="no_va">No va</option>
+                                        <option value="comuni">Comuni / Ofrecimiento</option>
+                                        <option value="vendido">Se vendio</option>
+                                        <option value="stock">Stock</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="border-t pt-4">
+                                <h4 class="text-sm font-bold text-gray-600 mb-2">Stock</h4>
+                                <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Fecha Ingreso</label>
+                                        <input type="text" name="stockDate" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Ubicacion</label>
+                                        <input type="text" name="location" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Contenido</label>
+                                        <input type="text" name="content" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Redes</label>
+                                        <input type="text" name="networks" class="w-full p-2 border rounded">
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Precio Cliente</label>
+                                        <input type="number" name="clientPrice" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Mi Precio</label>
+                                        <input type="number" name="myPrice" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Multas</label>
+                                        <input type="text" name="fines" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Deuda Patente</label>
+                                        <input type="text" name="plateDebt" class="w-full p-2 border rounded">
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">SUATS</label>
+                                        <input type="text" name="suats" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Precio + bajo</label>
+                                        <input type="number" name="lowPrice" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Inf. Dominio</label>
+                                        <input type="text" name="domainInfo" class="w-full p-2 border rounded">
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium mb-1">Listo p/Transferir</label>
+                                        <input type="text" name="readyTransfer" class="w-full p-2 border rounded">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Notas</label>
+                                    <textarea name="notes" class="w-full p-2 border rounded h-24"></textarea>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium mb-1">Notas Stock</label>
+                                    <textarea name="stockNotes" class="w-full p-2 border rounded h-24"></textarea>
+                                </div>
+                            </div>
+                            <div class="flex justify-end gap-2 pt-4">
+                                <button type="button" onclick="closeModal('auto-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                                <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <div id="senados-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+                <div class="bg-white rounded-2xl w-full max-w-xl overflow-hidden">
+                    <div class="p-6 border-b">
+                        <h3 class="text-xl font-bold">Nuevo Senado</h3>
+                    </div>
+                    <div class="p-6">
+                        <form id="senados-form" onsubmit="saveSenado(event)" class="space-y-4">
+                            <input type="hidden" name="rowId" value="">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input type="text" name="auto" placeholder="Auto" class="w-full p-2 border rounded">
+                                <input type="text" name="precioVenta" placeholder="Precio venta" class="w-full p-2 border rounded">
+                                <input type="text" name="patente" placeholder="Patente" class="w-full p-2 border rounded">
+                                <input type="text" name="vendedor" placeholder="Vendedor" class="w-full p-2 border rounded">
+                                <input type="text" name="celularVendedor" placeholder="Celular vendedor" class="w-full p-2 border rounded">
+                                <input type="text" name="senaTurno" placeholder="Sena/Turno" class="w-full p-2 border rounded">
+                                <input type="text" name="diaTransfer" placeholder="Dia transferencia" class="w-full p-2 border rounded">
+                                <input type="text" name="comprador" placeholder="Comprador" class="w-full p-2 border rounded">
+                                <input type="text" name="celularComprador" placeholder="Celular comprador" class="w-full p-2 border rounded">
+                                <input type="text" name="fechaDefinitiva" placeholder="Fecha definitiva" class="w-full p-2 border rounded">
+                                <input type="text" name="ganancia" placeholder="Ganancia" class="w-full p-2 border rounded">
+                                <input type="text" name="propina" placeholder="Propina" class="w-full p-2 border rounded">
+                            </div>
+                            <div class="flex justify-end gap-2 pt-4">
+                                <button type="button" onclick="closeModal('senados-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                                <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <div id="ventas-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+                <div class="bg-white rounded-2xl w-full max-w-xl overflow-hidden">
+                    <div class="p-6 border-b">
+                        <h3 class="text-xl font-bold">Nueva Venta Externa</h3>
+                    </div>
+                    <div class="p-6">
+                        <form id="ventas-form" onsubmit="saveVenta(event)" class="space-y-4">
+                            <input type="hidden" name="rowId" value="">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input type="text" name="cliente" placeholder="Cliente" class="w-full p-2 border rounded">
+                                <input type="text" name="presupuesto" placeholder="Presupuesto" class="w-full p-2 border rounded">
+                                <input type="text" name="auto" placeholder="Auto" class="w-full p-2 border rounded">
+                                <input type="text" name="precio" placeholder="Precio" class="w-full p-2 border rounded">
+                                <input type="text" name="vendedor" placeholder="Vendedor" class="w-full p-2 border rounded">
+                                <input type="text" name="ganancia" placeholder="Ganancia" class="w-full p-2 border rounded">
+                                <input type="text" name="fecha" placeholder="Fecha" class="w-full p-2 border rounded">
+                            </div>
+                            <div class="flex justify-end gap-2 pt-4">
+                                <button type="button" onclick="closeModal('ventas-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                                <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <div id="pedidos-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+                <div class="bg-white rounded-2xl w-full max-w-xl overflow-hidden">
+                    <div class="p-6 border-b">
+                        <h3 class="text-xl font-bold">Nuevo Pedido</h3>
+                    </div>
+                    <div class="p-6">
+                        <form id="pedidos-form" onsubmit="savePedido(event)" class="space-y-4">
+                            <input type="hidden" name="rowId" value="">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input type="text" name="nombreAuto" placeholder="Nombre/Auto" class="w-full p-2 border rounded">
+                                <input type="text" name="presupuesto" placeholder="Presupuesto" class="w-full p-2 border rounded">
+                                <input type="text" name="auto" placeholder="Auto" class="w-full p-2 border rounded">
+                                <input type="text" name="ubicacion" placeholder="Ubicacion" class="w-full p-2 border rounded">
+                                <input type="text" name="precioBajo" placeholder="Precio + bajo" class="w-full p-2 border rounded">
+                                <input type="text" name="notas" placeholder="Notas" class="w-full p-2 border rounded">
+                            </div>
+                            <div class="flex justify-end gap-2 pt-4">
+                                <button type="button" onclick="closeModal('pedidos-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                                <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <div id="scanner-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+                <div class="bg-white rounded-2xl w-full max-w-xl overflow-hidden">
+                    <div class="p-6 border-b">
+                        <h3 class="text-xl font-bold">Nuevo Scanner</h3>
+                    </div>
+                    <div class="p-6">
+                        <form id="scanner-form" onsubmit="saveScanner(event)" class="space-y-4">
+                            <input type="hidden" name="rowId" value="">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input type="text" name="dia" placeholder="Dia" class="w-full p-2 border rounded">
+                                <input type="text" name="auto" placeholder="Auto" class="w-full p-2 border rounded">
+                                <input type="text" name="clienteNumero" placeholder="Cliente/Numero" class="w-full p-2 border rounded">
+                                <input type="text" name="tipo" placeholder="Particular/Agencia" class="w-full p-2 border rounded">
+                                <input type="text" name="ubicacion" placeholder="Ubicacion" class="w-full p-2 border rounded">
+                                <input type="text" name="borreFallas" placeholder="Borre fallas?" class="w-full p-2 border rounded">
+                                <input type="text" name="ganancias" placeholder="Ganancias" class="w-full p-2 border rounded">
+                            </div>
+                            <div class="flex justify-end gap-2 pt-4">
+                                <button type="button" onclick="closeModal('scanner-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                                <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <div id="movimientos-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+                <div class="bg-white rounded-2xl w-full max-w-xl overflow-hidden">
+                    <div class="p-6 border-b">
+                        <h3 class="text-xl font-bold">Nuevo Movimiento</h3>
+                    </div>
+                    <div class="p-6">
+                        <form id="movimientos-form" onsubmit="saveMovimiento(event)" class="space-y-4">
+                            <input type="hidden" name="rowId" value="">
+                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input type="text" name="fecha" placeholder="Fecha" class="w-full p-2 border rounded">
+                                <select name="tipo" class="w-full p-2 border rounded">
+                                    <option value="ingreso">Ingreso</option>
+                                    <option value="gasto">Gasto</option>
+                                </select>
+                                <input type="text" name="monto" placeholder="Monto" class="w-full p-2 border rounded">
+                                <input type="text" name="categoria" placeholder="Categoria" class="w-full p-2 border rounded">
+                                <input type="text" name="descripcion" placeholder="Descripcion" class="w-full p-2 border rounded">
+                                <input type="text" name="auto" placeholder="Auto (opcional)" class="w-full p-2 border rounded">
+                            </div>
+                            <div class="flex justify-end gap-2 pt-4">
+                                <button type="button" onclick="closeModal('movimientos-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                                <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <div id="auth-overlay" class="fixed inset-0 bg-gray-900/60 hidden items-center justify-center z-[60] p-4">
+                <div class="bg-white rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
+                    <div class="p-6 border-b bg-gray-50">
+                        <h3 class="text-xl font-bold text-gray-900">Ingresar</h3>
+                        <p class="text-sm text-gray-500">Accede con tu cuenta.</p>
+                    </div>
+                    <div class="p-6">
+                        <form onsubmit="authLogin(event)" class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Email</label>
+                                <input id="auth-email" type="email" class="w-full p-2 border rounded" placeholder="tu@email.com" required />
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Contrasena</label>
+                                <input id="auth-password" type="password" class="w-full p-2 border rounded" placeholder="********" required />
+                            </div>
+                            <div id="auth-message" class="text-sm text-red-600"></div>
+                            <div class="flex items-center justify-between gap-2 pt-2">
+                                <button type="button" onclick="authResetPassword()" class="text-sm text-blue-600 hover:underline">Olvide mi contrasena</button>
+                                <div class="flex gap-2">
+                                    <button type="button" onclick="authSignup()" class="px-4 py-2 bg-gray-800 text-white rounded-lg font-bold">Crear cuenta</button>
+                                    <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-bold">Ingresar</button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
         };
 
         window.saveStageTitles = async () => {

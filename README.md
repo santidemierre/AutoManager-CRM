@@ -1,6 +1,6 @@
 # AutoManager CRM (demo)
 
-App web (un solo archivo) para gestionar operaciones de autos: pipeline tipo Kanban, clientes, finanzas, notas por etapa y autenticación con Firebase.
+App web (un solo archivo) para gestionar autos. Incluye inventario con cards, senados, ventas externas, pedidos, scanner y caja.
 
 ## Ejecutar local
 
@@ -18,3 +18,7 @@ La configuración está en `netlify.toml`.
 ## Firebase
 
 El login usa Firebase Auth (Email/Password). En Firebase Console habilitar el provider Email/Password.
+
+## Versionado
+
+- La version anterior quedo guardada en el branch `legacy` y el tag `v1-legacy`.

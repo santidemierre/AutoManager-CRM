@@ -534,7 +534,8 @@
         window.openNewAutoFormWithStatus = (status) => {
             window.openNewAutoForm();
             const form = document.getElementById('auto-form');
-            form?.querySelector('[name="status"]')?.value = status || '';
+            const statusField = form ? form.querySelector('[name="status"]') : null;
+            if (statusField) statusField.value = status || '';
         };
 
         window.openEditAutoForm = (autoId) => {

@@ -856,6 +856,36 @@
             return normalizeNumber(cleaned);
         }
 
+        function showToast(message, type = 'success') {
+            const container = document.getElementById('toast-container');
+            if (!container) return;
+            const toast = document.createElement('div');
+            const base = 'pointer-events-auto px-4 py-3 rounded-lg shadow-lg text-sm font-semibold';
+            const theme = type === 'error' ? 'bg-red-600 text-white' : 'bg-emerald-600 text-white';
+            toast.className = `${base} ${theme}`;
+            toast.textContent = message;
+            toast.addEventListener('click', () => toast.remove());
+            container.appendChild(toast);
+            setTimeout(() => toast.remove(), 3200);
+        }
+
+        async function appendItems(name, items) {
+            if (!items.length) return;
+            if (!firebaseEnabled) {
+                if (name === 'autos') autos = [...items, ...autos];
+                if (name === 'senados') senados = [...items, ...senados];
+                if (name === 'ventas') ventas = [...items, ...ventas];
+                if (name === 'pedidos') pedidos = [...items, ...pedidos];
+                if (name === 'scanner') scanner = [...items, ...scanner];
+                saveLocalState();
+                return;
+            }
+            for (const item of items) {
+                const { id, ...payload } = item;
+                await addDoc(getCollectionRef(currentUser.uid, name), payload);
+            }
+        }
+
         async function importSheetData(sheetName, rows) {
             const now = new Date().toISOString();
 
@@ -1062,19 +1092,133 @@
             input.click();
         };
 
+        function buildDemoData() {
+            const now = new Date().toISOString();
+            return {
+                autos: [
+                    {
+                        id: makeId('auto'),
+                        uniqueCode: 'Perez Juan',
+                        autoName: 'Peugeot 208',
+                        ownerName: 'Juan Perez',
+                        year: '2019',
+                        plate: 'AB123CD',
+                        price: 8500000,
+                        status: 'para_ver',
+                        location: 'Recoleta',
+                        createdAt: now,
+                        updatedAt: now
+                    },
+                    {
+                        id: makeId('auto'),
+                        uniqueCode: 'Gomez Ana',
+                        autoName: 'VW Amarok',
+                        ownerName: 'Ana Gomez',
+                        year: '2021',
+                        plate: 'AD456EF',
+                        price: 18500000,
+                        status: 'stock',
+                        location: 'San Isidro',
+                        createdAt: now,
+                        updatedAt: now
+                    }
+                ],
+                senados: [
+                    {
+                        id: makeId('senado'),
+                        auto: 'Fiat Cronos',
+                        precioVenta: '9200000',
+                        patente: 'AE987GH',
+                        vendedor: 'Santi',
+                        senaTurno: 'Senado 300k',
+                        diaTransfer: '2026-05-23',
+                        comprador: 'Lucas Diaz',
+                        createdAt: now,
+                        updatedAt: now
+                    }
+                ],
+                ventas: [
+                    {
+                        id: makeId('venta'),
+                        cliente: 'Agencia Norte',
+                        presupuesto: '12000000',
+                        auto: 'Toyota Corolla',
+                        precio: '11800000',
+                        vendedor: 'Maru',
+                        ganancia: '450000',
+                        fecha: '2026-05-10',
+                        createdAt: now,
+                        updatedAt: now
+                    }
+                ],
+                pedidos: [
+                    {
+                        id: makeId('pedido'),
+                        nombreAuto: 'SUV 2020+',
+                        presupuesto: '15000000',
+                        auto: 'Toyota Rav4',
+                        ubicacion: 'Zona Oeste',
+                        precioBajo: '14000000',
+                        notas: 'Cliente urgente',
+                        createdAt: now,
+                        updatedAt: now
+                    }
+                ],
+                scanner: [
+                    {
+                        id: makeId('scanner'),
+                        dia: '2026-05-12',
+                        auto: 'Ford Focus',
+                        clienteNumero: '11-5555-1111',
+                        tipo: 'Particular',
+                        ubicacion: 'Belgrano',
+                        borreFallas: 'Si',
+                        ganancias: 85000,
+                        createdAt: now,
+                        updatedAt: now
+                    }
+                ]
+            };
+        }
+
+        window.importDemoData = async () => {
+            if (!currentUser && firebaseEnabled) return;
+            try {
+                const demo = buildDemoData();
+                await appendItems('autos', demo.autos);
+                await appendItems('senados', demo.senados);
+                await appendItems('ventas', demo.ventas);
+                await appendItems('pedidos', demo.pedidos);
+                await appendItems('scanner', demo.scanner);
+                render();
+                showToast('Demo importada con exito.');
+            } catch (error) {
+                console.error(error);
+                showToast('No se pudo importar la demo.', 'error');
+            }
+        };
+
         window.handleExcelImport = async (e) => {
             const file = e.target.files?.[0];
             if (!file) return;
             if (!currentUser && firebaseEnabled) return;
-            const buffer = await readFileAsArrayBuffer(file);
-            const workbook = XLSX.read(buffer, { type: 'array' });
-            for (const sheetName of workbook.SheetNames) {
-                const sheet = workbook.Sheets[sheetName];
-                const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
-                await importSheetData(sheetName, rows);
+            try {
+                const buffer = await readFileAsArrayBuffer(file);
+                const workbook = XLSX.read(buffer, { type: 'array' });
+                for (const sheetName of workbook.SheetNames) {
+                    const sheet = workbook.Sheets[sheetName];
+                    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+                    await importSheetData(sheetName, rows);
+                }
+                render();
+                showToast('Excel importado con exito.');
+            } catch (error) {
+                console.error(error);
+                showToast('No se pudo importar el Excel.', 'error');
             }
-            render();
         };
+
+        window.openExcelHelp = () => openModal('excel-help-modal');
 
         window.saveQuickAuto = async (e) => {
             e.preventDefault();
@@ -1216,11 +1360,13 @@
                         <h2 class="text-2xl font-bold text-gray-800">Pipeline de Autos</h2>
                         <p class="text-gray-500 text-sm">Movelos por etapa como en Jira.</p>
                     </div>
-                    <div class="flex gap-3">
+                    <div class="flex gap-3 flex-wrap">
                         <input type="text" id="kanban-search" placeholder="Buscar por auto, cliente, patente..." class="w-64 p-2 border rounded-lg shadow-sm">
                         <button onclick="openQuickAutoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo Auto</button>
                         <button onclick="openNewAutoForm()" class="bg-white text-blue-700 border border-blue-200 px-4 py-2 rounded-lg font-semibold">Detalles</button>
                         <button onclick="importExcelDemo()" class="bg-gray-900 text-white px-4 py-2 rounded-lg font-semibold">Importar Excel</button>
+                        <button onclick="importDemoData()" class="bg-white text-gray-900 border border-gray-200 px-4 py-2 rounded-lg font-semibold">Importar demo</button>
+                        <button onclick="openExcelHelp()" class="bg-white text-gray-900 border border-gray-200 px-3 py-2 rounded-lg font-semibold">Ayuda Excel</button>
                     </div>
                 </div>
                 <div id="kanban-board" class="flex-1 flex gap-4 overflow-x-auto pb-4 custom-scroll items-start"></div>
@@ -1608,10 +1754,33 @@
         </div>
     </div>
 
+    <div id="excel-help-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl w-full max-w-2xl overflow-hidden">
+            <div class="p-6 border-b flex items-center justify-between">
+                <h3 class="text-xl font-bold">Ayuda Excel</h3>
+                <button type="button" onclick="closeModal('excel-help-modal')" class="text-gray-500">Cerrar</button>
+            </div>
+            <div class="p-6 space-y-4 text-sm text-gray-700">
+                <p class="text-gray-600">Hojas soportadas (nombre exacto) y columnas minimas:</p>
+                <ul class="list-disc pl-6 space-y-1">
+                    <li><strong>GENERAL</strong>: AUTO, NOMBRE, PRECIO (y opcional: PATENTE, AÑO)</li>
+                    <li><strong>STOCK</strong>: AUTO, NOMBRE, Fecha Ingreso, UBICACION</li>
+                    <li><strong>BUSCAR</strong>: NOMBRE-AUTO, PRESUPUESTO</li>
+                    <li><strong>SEÑADO</strong>: AUTO, PRECIO VENTA, PATENTE</li>
+                    <li><strong>VENTA X AFUERA</strong>: CLIENTE, PRESUPUESTO</li>
+                    <li><strong>SCANNER</strong>: DIA, AUTO</li>
+                </ul>
+                <p class="text-gray-600">Si falta alguna columna clave, esa hoja se ignora.</p>
+            </div>
+        </div>
+    </div>
+
     <input id="excel-import-input" type="file" accept=".xlsx" class="hidden" onchange="handleExcelImport(event)">
     <datalist id="auto-name-list"></datalist>
     <datalist id="owner-name-list"></datalist>
     <datalist id="location-list"></datalist>
+
+    <div id="toast-container" class="fixed top-4 right-4 z-[80] space-y-2 pointer-events-none"></div>
 
     <div id="senados-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
         <div class="bg-white rounded-2xl w-full max-w-xl overflow-hidden">

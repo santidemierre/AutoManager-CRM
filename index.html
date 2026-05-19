@@ -377,7 +377,7 @@
             const formData = new FormData(e.target);
             const autoId = (formData.get('autoId') || '').toString().trim();
             const now = new Date().toISOString();
-            const fallbackUnique = (formData.get('plate') || '').toString().trim();
+            const fallbackUnique = (formData.get('ownerName') || '').toString().trim();
             const uniqueCode = (formData.get('uniqueCode') || '').toString().trim() || fallbackUnique || makeId('auto');
             const defaultStatus = (formData.get('status') || '').toString().trim() || 'para_ver';
             const payload = {
@@ -677,7 +677,7 @@
                             <div class="font-bold text-gray-700">${escapeHtml(stage.label)}</div>
                             <span class="bg-gray-300 text-xs px-2 py-1 rounded-full">${stageAutos.length}</span>
                         </div>
-                        <button class="mb-3 text-xs text-blue-600 hover:underline" onclick="openNewAutoFormWithStatus('${stage.value}')">+ Nuevo en ${escapeHtml(stage.label)}</button>
+                        <button class="mb-3 text-xs text-blue-600 hover:underline" onclick="openQuickAutoForm('${stage.value}')">+ Nuevo en ${escapeHtml(stage.label)}</button>
                         <div class="space-y-3 overflow-y-auto flex-1 pb-3 rounded-md" data-dropzone="1" ondragover="onDragOverStatus(event)" ondragleave="onDragLeaveStatus(event)" ondrop="onDropAutoToStatus(event, '${stage.value}')">
                             ${stageAutos.map(a => `
                                 <div draggable="true" ondragstart="onDragStartAuto(event, '${a.id}')" ondragend="onDragEndAuto()" class="bg-white p-3 rounded shadow-sm border-l-4 border-sky-500 cursor-pointer hover:shadow-md transition-shadow" onclick="openEditAutoForm('${a.id}')">
@@ -732,6 +732,7 @@
         }
 
         function render() {
+            refreshDatalists();
             if (activeView === 'kanban') renderKanban();
             if (activeView === 'autos') renderAutos();
             if (activeView === 'senados') renderSenados();
@@ -739,6 +740,25 @@
             if (activeView === 'pedidos') renderPedidos();
             if (activeView === 'scanner') renderScanner();
             if (activeView === 'caja') renderCaja();
+        }
+
+        function refreshDatalists() {
+            const autoNames = new Set();
+            const ownerNames = new Set();
+            const locations = new Set();
+            autos.forEach((a) => {
+                if (a.autoName) autoNames.add(a.autoName);
+                if (a.ownerName) ownerNames.add(a.ownerName);
+                if (a.location) locations.add(a.location);
+            });
+
+            const autoList = document.getElementById('auto-name-list');
+            const ownerList = document.getElementById('owner-name-list');
+            const locationList = document.getElementById('location-list');
+
+            if (autoList) autoList.innerHTML = Array.from(autoNames).map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
+            if (ownerList) ownerList.innerHTML = Array.from(ownerNames).map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
+            if (locationList) locationList.innerHTML = Array.from(locations).map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
         }
 
         window.draggingAutoId = null;
@@ -786,6 +806,45 @@
 
         window.openModal = (id) => document.getElementById(id).classList.remove('hidden');
         window.closeModal = (id) => document.getElementById(id).classList.add('hidden');
+
+        window.openQuickAutoForm = (status) => {
+            const form = document.getElementById('quick-auto-form');
+            if (form) form.reset();
+            const statusField = form ? form.querySelector('[name="status"]') : null;
+            if (statusField) statusField.value = status || 'para_ver';
+            openModal('quick-auto-modal');
+        };
+
+        window.saveQuickAuto = async (e) => {
+            e.preventDefault();
+            if (!currentUser) return;
+            const formData = new FormData(e.target);
+            const now = new Date().toISOString();
+            const fallbackUnique = (formData.get('ownerName') || '').toString().trim();
+            const uniqueCode = (formData.get('uniqueCode') || '').toString().trim() || fallbackUnique || makeId('auto');
+            const status = (formData.get('status') || '').toString().trim() || 'para_ver';
+
+            const payload = {
+                uniqueCode,
+                autoName: (formData.get('autoName') || '').toString().trim(),
+                ownerName: (formData.get('ownerName') || '').toString().trim(),
+                price: normalizeNumber(formData.get('price')),
+                status,
+                location: (formData.get('location') || '').toString().trim(),
+                notes: (formData.get('notes') || '').toString().trim(),
+                updatedAt: now
+            };
+
+            if (!firebaseEnabled) {
+                autos.unshift({ id: makeId('auto'), createdAt: now, ...payload });
+                saveLocalState();
+                render();
+            } else {
+                await addDoc(getCollectionRef(currentUser.uid, 'autos'), { ...payload, createdAt: now });
+            }
+            e.target.reset();
+            closeModal('quick-auto-modal');
+        };
 
         window.addEventListener('DOMContentLoaded', () => {
             if (!firebaseEnabled) {
@@ -898,7 +957,8 @@
                     </div>
                     <div class="flex gap-3">
                         <input type="text" id="kanban-search" placeholder="Buscar por auto, cliente, patente..." class="w-64 p-2 border rounded-lg shadow-sm">
-                        <button onclick="openNewAutoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo Auto</button>
+                        <button onclick="openQuickAutoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo Auto</button>
+                        <button onclick="openNewAutoForm()" class="bg-white text-blue-700 border border-blue-200 px-4 py-2 rounded-lg font-semibold">Detalles</button>
                     </div>
                 </div>
                 <div id="kanban-board" class="flex-1 flex gap-4 overflow-x-auto pb-4 custom-scroll items-start"></div>
@@ -1082,117 +1142,126 @@
             <div class="p-6">
                 <form id="auto-form" onsubmit="saveAuto(event)" class="space-y-4">
                     <input type="hidden" name="autoId" id="auto-id" value="">
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">ID Unico</label>
-                            <input type="text" name="uniqueCode" placeholder="Ej: PATENTE o ID" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Auto</label>
-                            <input type="text" name="autoName" required class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Nombre</label>
-                            <input type="text" name="ownerName" class="w-full p-2 border rounded">
-                        </div>
-                    </div>
-                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Papers/VTV</label>
-                            <input type="text" name="papers" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Version</label>
-                            <input type="text" name="version" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Ano</label>
-                            <input type="text" name="year" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Patente</label>
-                            <input type="text" name="plate" class="w-full p-2 border rounded">
-                        </div>
-                    </div>
-                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">KM</label>
-                            <input type="text" name="km" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Nafta</label>
-                            <input type="text" name="fuel" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Service/Distrib</label>
-                            <input type="text" name="service" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Man/AT</label>
-                            <input type="text" name="transmission" class="w-full p-2 border rounded">
-                        </div>
-                    </div>
-                    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Interior</label>
-                            <input type="text" name="interior" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Cubiertas</label>
-                            <input type="text" name="tires" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Aire</label>
-                            <input type="text" name="ac" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Choque</label>
-                            <input type="text" name="collision" class="w-full p-2 border rounded">
-                        </div>
-                    </div>
-                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Por que lo vendes</label>
-                            <input type="text" name="sellReason" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Precio</label>
-                            <input type="number" name="price" class="w-full p-2 border rounded">
-                        </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Estado</label>
-                            <select name="status" class="w-full p-2 border rounded">
-                                <option value="">Selecciona estado</option>
-                                <option value="para_ver">Para ir a ver</option>
-                                <option value="fui_ver">Fui a ver</option>
-                                <option value="no_va">No va</option>
-                                <option value="comuni">Comuni / Ofrecimiento</option>
-                                <option value="vendido">Se vendio</option>
-                                <option value="stock">Stock</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="border-t pt-4">
-                        <h4 class="text-sm font-bold text-gray-600 mb-2">Stock</h4>
-                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div class="rounded-xl border border-blue-100 bg-blue-50 p-4">
+                        <div class="flex items-center justify-between mb-3">
                             <div>
-                                <label class="block text-sm font-medium mb-1">Fecha Ingreso</label>
-                                <input type="date" name="stockDate" class="w-full p-2 border rounded">
+                                <div class="text-xs font-bold uppercase text-blue-500">Basico</div>
+                                <div class="text-sm text-blue-700">Carga rapida con lo minimo.</div>
+                            </div>
+                            <button type="button" onclick="openQuickAutoForm()" class="text-xs text-blue-700 hover:underline">Abrir version rapida</button>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">ID Unico</label>
+                                <input type="text" name="uniqueCode" placeholder="Ej: Nombre cliente" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Auto</label>
+                                <input type="text" name="autoName" list="auto-name-list" required class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Nombre</label>
+                                <input type="text" name="ownerName" list="owner-name-list" class="w-full p-2 border rounded">
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Precio</label>
+                                <input type="number" name="price" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Estado</label>
+                                <select name="status" class="w-full p-2 border rounded">
+                                    <option value="">Selecciona estado</option>
+                                    <option value="para_ver">Para ir a ver</option>
+                                    <option value="fui_ver">Fui a ver</option>
+                                    <option value="no_va">No va</option>
+                                    <option value="comuni">Comuni / Ofrecimiento</option>
+                                    <option value="vendido">Se vendio</option>
+                                    <option value="stock">Stock</option>
+                                </select>
                             </div>
                             <div>
                                 <label class="block text-sm font-medium mb-1">Ubicacion</label>
-                                <input type="text" name="location" class="w-full p-2 border rounded">
+                                <input type="text" name="location" list="location-list" class="w-full p-2 border rounded">
+                            </div>
+                        </div>
+                    </div>
+                    <details class="border rounded-xl p-4">
+                        <summary class="cursor-pointer text-sm font-semibold text-gray-700">Detalles completos</summary>
+                        <div class="mt-4 grid grid-cols-1 md:grid-cols-4 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Papers/VTV</label>
+                                <input type="text" name="papers" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Version</label>
+                                <input type="text" name="version" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Ano</label>
+                                <input type="text" name="year" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Patente</label>
+                                <input type="text" name="plate" class="w-full p-2 border rounded">
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">KM</label>
+                                <input type="text" name="km" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Nafta</label>
+                                <input type="text" name="fuel" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Service/Distrib</label>
+                                <input type="text" name="service" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Man/AT</label>
+                                <input type="text" name="transmission" class="w-full p-2 border rounded">
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Interior</label>
+                                <input type="text" name="interior" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Cubiertas</label>
+                                <input type="text" name="tires" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Aire</label>
+                                <input type="text" name="ac" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Choque</label>
+                                <input type="text" name="collision" class="w-full p-2 border rounded">
+                            </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Por que lo vendes</label>
+                                <input type="text" name="sellReason" class="w-full p-2 border rounded">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Fecha ingreso</label>
+                                <input type="date" name="stockDate" class="w-full p-2 border rounded">
                             </div>
                             <div>
                                 <label class="block text-sm font-medium mb-1">Contenido</label>
                                 <input type="text" name="content" class="w-full p-2 border rounded">
                             </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
                             <div>
                                 <label class="block text-sm font-medium mb-1">Redes</label>
                                 <input type="text" name="networks" class="w-full p-2 border rounded">
                             </div>
-                        </div>
-                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
                             <div>
                                 <label class="block text-sm font-medium mb-1">Precio Cliente</label>
                                 <input type="number" name="clientPrice" class="w-full p-2 border rounded">
@@ -1205,12 +1274,12 @@
                                 <label class="block text-sm font-medium mb-1">Multas</label>
                                 <input type="text" name="fines" class="w-full p-2 border rounded">
                             </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
                             <div>
                                 <label class="block text-sm font-medium mb-1">Deuda Patente</label>
                                 <input type="text" name="plateDebt" class="w-full p-2 border rounded">
                             </div>
-                        </div>
-                        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">
                             <div>
                                 <label class="block text-sm font-medium mb-1">SUATS</label>
                                 <input type="text" name="suats" class="w-full p-2 border rounded">
@@ -1223,22 +1292,22 @@
                                 <label class="block text-sm font-medium mb-1">Inf. Dominio</label>
                                 <input type="text" name="domainInfo" class="w-full p-2 border rounded">
                             </div>
+                        </div>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
                             <div>
                                 <label class="block text-sm font-medium mb-1">Listo p/Transferir</label>
                                 <input type="text" name="readyTransfer" class="w-full p-2 border rounded">
                             </div>
+                            <div>
+                                <label class="block text-sm font-medium mb-1">Notas Stock</label>
+                                <textarea name="stockNotes" class="w-full p-2 border rounded h-24"></textarea>
+                            </div>
                         </div>
-                    </div>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div>
+                        <div class="mt-4">
                             <label class="block text-sm font-medium mb-1">Notas</label>
                             <textarea name="notes" class="w-full p-2 border rounded h-24"></textarea>
                         </div>
-                        <div>
-                            <label class="block text-sm font-medium mb-1">Notas Stock</label>
-                            <textarea name="stockNotes" class="w-full p-2 border rounded h-24"></textarea>
-                        </div>
-                    </div>
+                    </details>
                     <div class="flex justify-end gap-2 pt-4">
                         <button type="button" onclick="closeModal('auto-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
                         <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
@@ -1247,6 +1316,44 @@
             </div>
         </div>
     </div>
+
+    <div id="quick-auto-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl w-full max-w-lg overflow-hidden">
+            <div class="p-6 border-b">
+                <h3 class="text-xl font-bold">Carga Rapida</h3>
+            </div>
+            <div class="p-6">
+                <form id="quick-auto-form" onsubmit="saveQuickAuto(event)" class="space-y-4">
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <input type="text" name="uniqueCode" placeholder="ID unico (opcional)" class="w-full p-2 border rounded">
+                        <input type="text" name="autoName" list="auto-name-list" placeholder="Auto" required class="w-full p-2 border rounded">
+                        <input type="text" name="ownerName" list="owner-name-list" placeholder="Nombre cliente" class="w-full p-2 border rounded">
+                        <input type="number" name="price" placeholder="Precio" class="w-full p-2 border rounded">
+                        <input type="text" name="location" list="location-list" placeholder="Ubicacion" class="w-full p-2 border rounded">
+                        <select name="status" class="w-full p-2 border rounded">
+                            <option value="para_ver">Para ir a ver</option>
+                            <option value="fui_ver">Fui a ver</option>
+                            <option value="no_va">No va</option>
+                            <option value="comuni">Comuni / Ofrecimiento</option>
+                            <option value="vendido">Se vendio</option>
+                            <option value="stock">Stock</option>
+                        </select>
+                    </div>
+                    <div>
+                        <textarea name="notes" placeholder="Notas rapidas" class="w-full p-2 border rounded h-20"></textarea>
+                    </div>
+                    <div class="flex justify-end gap-2 pt-2">
+                        <button type="button" onclick="closeModal('quick-auto-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>
+                        <button type="submit" class="px-6 py-2 bg-blue-600 text-white rounded-lg font-bold">Guardar</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <datalist id="auto-name-list"></datalist>
+    <datalist id="owner-name-list"></datalist>
+    <datalist id="location-list"></datalist>
 
     <div id="senados-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
         <div class="bg-white rounded-2xl w-full max-w-xl overflow-hidden">

@@ -1135,11 +1135,11 @@
     </div>
 
     <div id="auto-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
-        <div class="bg-white rounded-2xl w-full max-w-3xl overflow-hidden">
+        <div class="bg-white rounded-2xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col">
             <div class="p-6 border-b">
                 <h3 id="auto-modal-title" class="text-xl font-bold">Nuevo Auto</h3>
             </div>
-            <div class="p-6">
+            <div class="p-6 overflow-y-auto">
                 <form id="auto-form" onsubmit="saveAuto(event)" class="space-y-4">
                     <input type="hidden" name="autoId" id="auto-id" value="">
                     <div class="rounded-xl border border-blue-100 bg-blue-50 p-4">
@@ -1325,11 +1325,9 @@
             <div class="p-6">
                 <form id="quick-auto-form" onsubmit="saveQuickAuto(event)" class="space-y-4">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <input type="text" name="uniqueCode" placeholder="ID unico (opcional)" class="w-full p-2 border rounded">
                         <input type="text" name="autoName" list="auto-name-list" placeholder="Auto" required class="w-full p-2 border rounded">
                         <input type="text" name="ownerName" list="owner-name-list" placeholder="Nombre cliente" class="w-full p-2 border rounded">
                         <input type="number" name="price" placeholder="Precio" class="w-full p-2 border rounded">
-                        <input type="text" name="location" list="location-list" placeholder="Ubicacion" class="w-full p-2 border rounded">
                         <select name="status" class="w-full p-2 border rounded">
                             <option value="para_ver">Para ir a ver</option>
                             <option value="fui_ver">Fui a ver</option>
@@ -1338,9 +1336,6 @@
                             <option value="vendido">Se vendio</option>
                             <option value="stock">Stock</option>
                         </select>
-                    </div>
-                    <div>
-                        <textarea name="notes" placeholder="Notas rapidas" class="w-full p-2 border rounded h-20"></textarea>
                     </div>
                     <div class="flex justify-end gap-2 pt-2">
                         <button type="button" onclick="closeModal('quick-auto-modal')" class="px-4 py-2 text-gray-500">Cancelar</button>

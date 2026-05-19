@@ -9,6 +9,7 @@
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import * as XLSX from "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm";
 
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'auto-manager-crm';
         const FALLBACK_FIREBASE_CONFIG = {
@@ -815,6 +816,266 @@
             openModal('quick-auto-modal');
         };
 
+        async function readFileAsArrayBuffer(file) {
+            return await file.arrayBuffer();
+        }
+
+        function findHeaderRow(rows, required) {
+            for (let i = 0; i < rows.length; i += 1) {
+                const row = rows[i] || [];
+                const normalized = row.map((v) => (v || '').toString().trim().toUpperCase());
+                const ok = required.every((key) => normalized.includes(key));
+                if (ok) return i;
+            }
+            return -1;
+        }
+
+        function rowsToObjects(rows, headerIndex) {
+            const header = rows[headerIndex] || [];
+            const keys = header.map((v) => (v || '').toString().trim());
+            return rows.slice(headerIndex + 1).map((row) => {
+                const obj = {};
+                keys.forEach((key, idx) => {
+                    if (!key) return;
+                    obj[key] = row?.[idx] ?? '';
+                });
+                return obj;
+            }).filter((obj) => Object.values(obj).some((v) => v !== null && v !== undefined && v !== ''));
+        }
+
+        function normalizeDate(value) {
+            if (!value) return '';
+            if (value instanceof Date) return value.toISOString().slice(0, 10);
+            const asString = value.toString().trim();
+            return asString;
+        }
+
+        function normalizeMoney(value) {
+            if (typeof value === 'number') return value;
+            const cleaned = (value || '').toString().replace(/[^0-9.]/g, '');
+            return normalizeNumber(cleaned);
+        }
+
+        async function importSheetData(sheetName, rows) {
+            const now = new Date().toISOString();
+
+            if (sheetName === 'GENERAL') {
+                const headerIndex = findHeaderRow(rows, ['AUTO', 'NOMBRE']);
+                if (headerIndex < 0) return;
+                const items = rowsToObjects(rows, headerIndex).map((row) => ({
+                    id: makeId('auto'),
+                    uniqueCode: (row['NOMBRE'] || '').toString().trim() || makeId('auto'),
+                    autoName: (row['AUTO'] || '').toString().trim(),
+                    ownerName: (row['NOMBRE'] || '').toString().trim(),
+                    papers: (row['PAPELES/VTV'] || '').toString().trim(),
+                    version: (row['VERSION'] || '').toString().trim(),
+                    year: (row['AÑO'] || row['ANO'] || '').toString().trim(),
+                    plate: (row['PATENTE'] || '').toString().trim(),
+                    km: (row['KM'] || '').toString().trim(),
+                    fuel: (row['NAFTA'] || '').toString().trim(),
+                    service: (row['SERVIS/DISTRIB'] || '').toString().trim(),
+                    transmission: (row['MAN/AT'] || '').toString().trim(),
+                    interior: (row['INTERIOR'] || '').toString().trim(),
+                    tires: (row['CUBIERTAS'] || '').toString().trim(),
+                    ac: (row['AIRE ACOND.'] || '').toString().trim(),
+                    collision: (row['CHOQUE'] || '').toString().trim(),
+                    sellReason: (row['XQ LO VENDES?'] || '').toString().trim(),
+                    price: normalizeMoney(row['PRECIO']),
+                    notes: (row['NOTAS'] || '').toString().trim(),
+                    status: 'para_ver',
+                    createdAt: now,
+                    updatedAt: now
+                }));
+
+                if (!items.length) return;
+                if (!firebaseEnabled) {
+                    autos = [...items, ...autos];
+                    saveLocalState();
+                } else {
+                    for (const item of items) {
+                        const { id, ...payload } = item;
+                        await addDoc(getCollectionRef(currentUser.uid, 'autos'), payload);
+                    }
+                }
+            }
+
+            if (sheetName === 'STOCK') {
+                const headerIndex = findHeaderRow(rows, ['AUTO', 'NOMBRE']);
+                if (headerIndex < 0) return;
+                const items = rowsToObjects(rows, headerIndex).map((row) => ({
+                    id: makeId('auto'),
+                    uniqueCode: (row['NOMBRE'] || '').toString().trim() || makeId('auto'),
+                    autoName: (row['AUTO'] || '').toString().trim(),
+                    ownerName: (row['NOMBRE'] || '').toString().trim(),
+                    stockDate: normalizeDate(row['Fecha Ingreso']),
+                    plate: (row['PATENTE'] || '').toString().trim(),
+                    location: (row['UBICACIÓN'] || row['UBICACION'] || '').toString().trim(),
+                    content: (row['CONTENIDO'] || '').toString().trim(),
+                    networks: (row['REDES'] || '').toString().trim(),
+                    clientPrice: normalizeMoney(row['PRECIO CLIENTE']),
+                    myPrice: normalizeMoney(row['MI PRECIO']),
+                    fines: (row['MULTAS?'] || '').toString().trim(),
+                    plateDebt: (row['DEUDA PATEN'] || '').toString().trim(),
+                    suats: (row['SUATS'] || '').toString().trim(),
+                    lowPrice: normalizeMoney(row['PRECIO + BAJO']),
+                    domainInfo: (row['Inf. Dominio'] || '').toString().trim(),
+                    readyTransfer: (row['Listo p/Transferir?'] || '').toString().trim(),
+                    stockNotes: (row['NOTAS'] || '').toString().trim(),
+                    status: 'stock',
+                    createdAt: now,
+                    updatedAt: now
+                }));
+
+                if (!items.length) return;
+                if (!firebaseEnabled) {
+                    autos = [...items, ...autos];
+                    saveLocalState();
+                } else {
+                    for (const item of items) {
+                        const { id, ...payload } = item;
+                        await addDoc(getCollectionRef(currentUser.uid, 'autos'), payload);
+                    }
+                }
+            }
+
+            if (sheetName === 'BUSCAR') {
+                const headerIndex = findHeaderRow(rows, ['NOMBRE-AUTO', 'PRESUPUESTO']);
+                if (headerIndex < 0) return;
+                const items = rowsToObjects(rows, headerIndex).map((row) => ({
+                    id: makeId('pedido'),
+                    nombreAuto: (row['NOMBRE-AUTO'] || '').toString().trim(),
+                    presupuesto: (row['PRESUPUESTO'] || '').toString().trim(),
+                    auto: (row['AUTO'] || '').toString().trim(),
+                    ubicacion: (row['UBICACIÓN'] || row['UBICACION'] || '').toString().trim(),
+                    precioBajo: (row['PRECIO + BAJO'] || '').toString().trim(),
+                    notas: (row['NOTAS'] || '').toString().trim(),
+                    createdAt: now,
+                    updatedAt: now
+                }));
+
+                if (!items.length) return;
+                if (!firebaseEnabled) {
+                    pedidos = [...items, ...pedidos];
+                    saveLocalState();
+                } else {
+                    for (const item of items) {
+                        const { id, ...payload } = item;
+                        await addDoc(getCollectionRef(currentUser.uid, 'pedidos'), payload);
+                    }
+                }
+            }
+
+            if (sheetName === 'SEÑADO') {
+                const headerIndex = findHeaderRow(rows, ['AUTO', 'PRECIO VENTA']);
+                if (headerIndex < 0) return;
+                const items = rowsToObjects(rows, headerIndex).map((row) => ({
+                    id: makeId('senado'),
+                    auto: (row['AUTO'] || '').toString().trim(),
+                    precioVenta: (row['PRECIO VENTA'] || '').toString().trim(),
+                    patente: (row['PATENTE'] || '').toString().trim(),
+                    vendedor: (row['VENDEDOR'] || row['VENDEDOR '] || '').toString().trim(),
+                    celularVendedor: (row['celular'] || '').toString().trim(),
+                    senaTurno: (row['SEÑA/TURNO'] || '').toString().trim(),
+                    diaTransfer: normalizeDate(row['DIA TRANSFE']),
+                    comprador: (row['COMPRADOR'] || '').toString().trim(),
+                    celularComprador: (row['celular_1'] || row['celular'] || '').toString().trim(),
+                    fechaDefinitiva: normalizeDate(row['FECHA DEFINITIVA']),
+                    ganancia: (row['GANANCIA'] || '').toString().trim(),
+                    propina: (row['Propina'] || '').toString().trim(),
+                    createdAt: now,
+                    updatedAt: now
+                }));
+
+                if (!items.length) return;
+                if (!firebaseEnabled) {
+                    senados = [...items, ...senados];
+                    saveLocalState();
+                } else {
+                    for (const item of items) {
+                        const { id, ...payload } = item;
+                        await addDoc(getCollectionRef(currentUser.uid, 'senados'), payload);
+                    }
+                }
+            }
+
+            if (sheetName === 'VENTA X AFUERA') {
+                const headerIndex = findHeaderRow(rows, ['CLIENTE', 'PRESUPUESTO']);
+                if (headerIndex < 0) return;
+                const items = rowsToObjects(rows, headerIndex).map((row) => ({
+                    id: makeId('venta'),
+                    cliente: (row['CLIENTE'] || '').toString().trim(),
+                    presupuesto: (row['PRESUPUESTO'] || '').toString().trim(),
+                    auto: (row['AUTO'] || '').toString().trim(),
+                    precio: (row['PRECIO'] || '').toString().trim(),
+                    vendedor: (row['VENDEDOR'] || '').toString().trim(),
+                    ganancia: (row['GANANCIA'] || '').toString().trim(),
+                    fecha: normalizeDate(row['FECHA']),
+                    createdAt: now,
+                    updatedAt: now
+                }));
+
+                if (!items.length) return;
+                if (!firebaseEnabled) {
+                    ventas = [...items, ...ventas];
+                    saveLocalState();
+                } else {
+                    for (const item of items) {
+                        const { id, ...payload } = item;
+                        await addDoc(getCollectionRef(currentUser.uid, 'ventas'), payload);
+                    }
+                }
+            }
+
+            if (sheetName === 'SCANNER') {
+                const headerIndex = findHeaderRow(rows, ['DIA', 'AUTO']);
+                if (headerIndex < 0) return;
+                const items = rowsToObjects(rows, headerIndex).map((row) => ({
+                    id: makeId('scanner'),
+                    dia: normalizeDate(row['DIA']),
+                    auto: (row['AUTO'] || '').toString().trim(),
+                    clienteNumero: (row['CLIENTE / NUMERO'] || '').toString().trim(),
+                    tipo: (row['PARTICULAR/AGENCIA'] || '').toString().trim(),
+                    ubicacion: (row['UBICACIÓN'] || row['UBICACION'] || '').toString().trim(),
+                    borreFallas: (row['¿BORRE FALLAS?'] || '').toString().trim(),
+                    ganancias: normalizeMoney(row['GANANCIAS']),
+                    createdAt: now,
+                    updatedAt: now
+                }));
+
+                if (!items.length) return;
+                if (!firebaseEnabled) {
+                    scanner = [...items, ...scanner];
+                    saveLocalState();
+                } else {
+                    for (const item of items) {
+                        const { id, ...payload } = item;
+                        await addDoc(getCollectionRef(currentUser.uid, 'scanner'), payload);
+                    }
+                }
+            }
+        }
+
+        window.importExcelDemo = async () => {
+            const input = document.getElementById('excel-import-input');
+            if (!input) return;
+            input.value = '';
+            input.click();
+        };
+
+        window.handleExcelImport = async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            if (!currentUser && firebaseEnabled) return;
+            const buffer = await readFileAsArrayBuffer(file);
+            const workbook = XLSX.read(buffer, { type: 'array' });
+            for (const sheetName of workbook.SheetNames) {
+                const sheet = workbook.Sheets[sheetName];
+                const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true });
+                await importSheetData(sheetName, rows);
+            }
+            render();
+        };
+
         window.saveQuickAuto = async (e) => {
             e.preventDefault();
             if (!currentUser) return;
@@ -959,6 +1220,7 @@
                         <input type="text" id="kanban-search" placeholder="Buscar por auto, cliente, patente..." class="w-64 p-2 border rounded-lg shadow-sm">
                         <button onclick="openQuickAutoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo Auto</button>
                         <button onclick="openNewAutoForm()" class="bg-white text-blue-700 border border-blue-200 px-4 py-2 rounded-lg font-semibold">Detalles</button>
+                        <button onclick="importExcelDemo()" class="bg-gray-900 text-white px-4 py-2 rounded-lg font-semibold">Importar Excel</button>
                     </div>
                 </div>
                 <div id="kanban-board" class="flex-1 flex gap-4 overflow-x-auto pb-4 custom-scroll items-start"></div>
@@ -1346,6 +1608,7 @@
         </div>
     </div>
 
+    <input id="excel-import-input" type="file" accept=".xlsx" class="hidden" onchange="handleExcelImport(event)">
     <datalist id="auto-name-list"></datalist>
     <datalist id="owner-name-list"></datalist>
     <datalist id="location-list"></datalist>

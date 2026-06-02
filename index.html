@@ -663,8 +663,21 @@
             const container = document.getElementById('kanban-board');
             if (!container) return;
             const searchVal = document.getElementById('kanban-search')?.value.toLowerCase() || '';
+            const kanbanStages = STATUS_OPTIONS.filter(stage => stage.value !== 'stock');
 
-            container.innerHTML = STATUS_OPTIONS.map((stage) => {
+            const stageCardClass = (status) => {
+                if (status === 'no_va') return 'bg-red-50 border-red-200';
+                if (status === 'vendido') return 'bg-emerald-50 border-emerald-200';
+                return 'bg-white border-gray-200';
+            };
+
+            const stageAccentClass = (status) => {
+                if (status === 'no_va') return 'border-red-400';
+                if (status === 'vendido') return 'border-emerald-400';
+                return 'border-sky-500';
+            };
+
+            container.innerHTML = kanbanStages.map((stage) => {
                 const stageAutos = autos.filter(a => {
                     const matchesStatus = (a.status || 'para_ver') === stage.value;
                     const haystack = `${a.autoName || ''} ${a.ownerName || ''} ${a.plate || ''} ${a.uniqueCode || ''}`.toLowerCase();
@@ -678,10 +691,14 @@
                             <div class="font-bold text-gray-700">${escapeHtml(stage.label)}</div>
                             <span class="bg-gray-300 text-xs px-2 py-1 rounded-full">${stageAutos.length}</span>
                         </div>
-                        <button class="mb-3 text-xs text-blue-600 hover:underline" onclick="openQuickAutoForm('${stage.value}')">+ Nuevo en ${escapeHtml(stage.label)}</button>
                         <div class="space-y-3 overflow-y-auto flex-1 pb-3 rounded-md" data-dropzone="1" ondragover="onDragOverStatus(event)" ondragleave="onDragLeaveStatus(event)" ondrop="onDropAutoToStatus(event, '${stage.value}')">
                             ${stageAutos.map(a => `
-                                <div draggable="true" ondragstart="onDragStartAuto(event, '${a.id}')" ondragend="onDragEndAuto()" class="bg-white p-3 rounded shadow-sm border-l-4 border-sky-500 cursor-pointer hover:shadow-md transition-shadow" onclick="openEditAutoForm('${a.id}')">
+                                <div draggable="true" ondragstart="onDragStartAuto(event, '${a.id}')" ondragend="onDragEndAuto()" class="${stageCardClass(stage.value)} p-3 rounded shadow-sm border-l-4 ${stageAccentClass(stage.value)} cursor-pointer hover:shadow-md transition-shadow" onclick="openEditAutoForm('${a.id}')">
+                                    ${(stage.value === 'no_va' || stage.value === 'vendido') ? `
+                                        <div class="flex justify-end">
+                                            <button class="text-[11px] text-red-600 hover:underline" onclick="event.stopPropagation(); deleteAuto('${a.id}')">Eliminar</button>
+                                        </div>
+                                    ` : ''}
                                     <div class="text-xs text-gray-500 font-bold mb-1">${escapeHtml(a.uniqueCode || 'AUTO')}</div>
                                     <div class="text-sm font-semibold">${escapeHtml(a.autoName || 'Sin modelo')}</div>
                                     <div class="text-xs text-gray-500">${escapeHtml(a.year || '')} ${a.plate ? '• ' + escapeHtml(a.plate) : ''}</div>

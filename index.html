@@ -435,7 +435,8 @@
             const now = new Date().toISOString();
             const fallbackUnique = (formData.get('ownerName') || '').toString().trim();
             const uniqueCode = (formData.get('uniqueCode') || '').toString().trim() || fallbackUnique || makeId('auto');
-            const defaultStatus = (formData.get('status') || '').toString().trim() || 'para_ver';
+            const defaultStatus = (formData.get('status') || '').toString().trim();
+            const rawPrice = (formData.get('price') || '').toString().trim();
             const payload = {
                 uniqueCode,
                 autoName: (formData.get('autoName') || '').toString().trim(),
@@ -476,6 +477,34 @@
             if (payload.status === 'no_va' && hasSenadoForAuto(candidateAuto)) {
                 showToast('Este auto está señado. No se puede pasar a "No va".', 'error');
                 return;
+            }
+
+            if (!payload.ownerName) {
+                showToast('El cliente es obligatorio.', 'error');
+                return;
+            }
+
+            if (!payload.status) {
+                showToast('El estado es obligatorio.', 'error');
+                return;
+            }
+
+            if (!payload.plate) {
+                showToast('La patente es obligatoria.', 'error');
+                return;
+            }
+
+            if (rawPrice && payload.price <= 0) {
+                showToast('El precio debe ser mayor a 0.', 'error');
+                return;
+            }
+
+            if (payload.year) {
+                const yearNum = parseInt(payload.year, 10);
+                if (!Number.isFinite(yearNum) || payload.year.length !== 4 || yearNum < 1990 || yearNum > 2030) {
+                    showToast('El año debe ser de 4 dígitos (1990 - 2030).', 'error');
+                    return;
+                }
             }
 
             if (isPlateDuplicate(payload.plate, autoId)) {
@@ -852,9 +881,9 @@
                                     ` : ''}
                                     <div class="text-xs text-gray-500 font-bold mb-1">${escapeHtml(a.uniqueCode || 'AUTO')}</div>
                                     <div class="text-sm font-semibold">${escapeHtml(a.autoName || 'Sin modelo')}</div>
-                                    ${hasSenadoForAuto(a) ? '<div class="mt-1 inline-flex text-[10px] px-2 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Señado</div>' : ''}
                                     <div class="text-xs text-gray-500">${escapeHtml(a.year || '')} ${a.plate ? '• ' + escapeHtml(a.plate) : ''}</div>
                                     <div class="mt-2 text-xs text-gray-600">$${(a.price || 0).toLocaleString()}</div>
+                                    ${hasSenadoForAuto(a) ? '<div class="mt-2 inline-flex text-[10px] px-2 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Señado</div>' : ''}
                                 </div>
                             `).join('')}
                         </div>
@@ -1790,7 +1819,7 @@
                             </div>
                             <div>
                                 <label class="block text-sm font-medium mb-1">Nombre</label>
-                                <input type="text" name="ownerName" list="owner-name-list" class="w-full p-2 border rounded">
+                                <input type="text" name="ownerName" list="owner-name-list" required class="w-full p-2 border rounded">
                             </div>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
@@ -1800,8 +1829,7 @@
                             </div>
                             <div>
                                 <label class="block text-sm font-medium mb-1">Estado</label>
-                                <select name="status" class="w-full p-2 border rounded">
-                                    <option value="">Selecciona estado</option>
+                                <select name="status" required class="w-full p-2 border rounded">
                                     <option value="para_ver">Para ir a ver</option>
                                     <option value="fui_ver">Fui a ver</option>
                                     <option value="no_va">No va</option>
@@ -1833,7 +1861,7 @@
                             </div>
                             <div>
                                 <label class="block text-sm font-medium mb-1">Patente</label>
-                                <input type="text" name="plate" class="w-full p-2 border rounded">
+                                <input type="text" name="plate" required class="w-full p-2 border rounded">
                             </div>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mt-4">

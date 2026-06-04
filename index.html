@@ -392,6 +392,16 @@
             return Number.isFinite(num) ? num : 0;
         }
 
+        function normalizePlate(value) {
+            return (value || '').toString().toUpperCase().replace(/[\s-]+/g, '').trim();
+        }
+
+        function isPlateDuplicate(plate, excludeId = '') {
+            const normalized = normalizePlate(plate);
+            if (!normalized) return false;
+            return autos.some(a => normalizePlate(a.plate) === normalized && (!excludeId || a.id !== excludeId));
+        }
+
         async function updateAutoStatus(autoId, status) {
             if (!currentUser) return;
             const id = (autoId || '').toString().trim();
@@ -433,7 +443,7 @@
                 papers: (formData.get('papers') || '').toString().trim(),
                 version: (formData.get('version') || '').toString().trim(),
                 year: (formData.get('year') || '').toString().trim(),
-                plate: (formData.get('plate') || '').toString().trim(),
+                plate: normalizePlate(formData.get('plate')),
                 km: (formData.get('km') || '').toString().trim(),
                 fuel: (formData.get('fuel') || '').toString().trim(),
                 service: (formData.get('service') || '').toString().trim(),
@@ -465,6 +475,11 @@
             const candidateAuto = autoId ? getAutoById(autoId) : { id: autoId, autoName: payload.autoName };
             if (payload.status === 'no_va' && hasSenadoForAuto(candidateAuto)) {
                 showToast('Este auto está señado. No se puede pasar a "No va".', 'error');
+                return;
+            }
+
+            if (isPlateDuplicate(payload.plate, autoId)) {
+                showToast('Ya existe un auto con esa patente.', 'error');
                 return;
             }
 
@@ -732,6 +747,10 @@
                         <div>
                             <div class="text-xs text-gray-500">Cliente</div>
                             <div class="font-semibold">${escapeHtml(a.ownerName || '-')}</div>
+                        </div>
+                        <div>
+                            <div class="text-xs text-gray-500">Patente</div>
+                            <div class="font-semibold">${escapeHtml(a.plate || '-')}</div>
                         </div>
                     </div>
                     <div class="mt-4 flex gap-2">
@@ -1043,30 +1062,41 @@
             if (sheetName === 'GENERAL') {
                 const headerIndex = findHeaderRow(rows, ['AUTO', 'NOMBRE']);
                 if (headerIndex < 0) return;
-                const items = rowsToObjects(rows, headerIndex).map((row) => ({
-                    id: makeId('auto'),
-                    uniqueCode: (row['NOMBRE'] || '').toString().trim() || makeId('auto'),
-                    autoName: (row['AUTO'] || '').toString().trim(),
-                    ownerName: (row['NOMBRE'] || '').toString().trim(),
-                    papers: (row['PAPELES/VTV'] || '').toString().trim(),
-                    version: (row['VERSION'] || '').toString().trim(),
-                    year: (row['AÑO'] || row['ANO'] || '').toString().trim(),
-                    plate: (row['PATENTE'] || '').toString().trim(),
-                    km: (row['KM'] || '').toString().trim(),
-                    fuel: (row['NAFTA'] || '').toString().trim(),
-                    service: (row['SERVIS/DISTRIB'] || '').toString().trim(),
-                    transmission: (row['MAN/AT'] || '').toString().trim(),
-                    interior: (row['INTERIOR'] || '').toString().trim(),
-                    tires: (row['CUBIERTAS'] || '').toString().trim(),
-                    ac: (row['AIRE ACOND.'] || '').toString().trim(),
-                    collision: (row['CHOQUE'] || '').toString().trim(),
-                    sellReason: (row['XQ LO VENDES?'] || '').toString().trim(),
-                    price: normalizeMoney(row['PRECIO']),
-                    notes: (row['NOTAS'] || '').toString().trim(),
-                    status: 'para_ver',
-                    createdAt: now,
-                    updatedAt: now
-                }));
+                const existingPlates = new Set(autos.map(a => normalizePlate(a.plate)).filter(Boolean));
+                const items = [];
+                let skipped = 0;
+                rowsToObjects(rows, headerIndex).forEach((row) => {
+                    const plate = normalizePlate(row['PATENTE']);
+                    if (plate && existingPlates.has(plate)) {
+                        skipped += 1;
+                        return;
+                    }
+                    if (plate) existingPlates.add(plate);
+                    items.push({
+                        id: makeId('auto'),
+                        uniqueCode: (row['NOMBRE'] || '').toString().trim() || makeId('auto'),
+                        autoName: (row['AUTO'] || '').toString().trim(),
+                        ownerName: (row['NOMBRE'] || '').toString().trim(),
+                        papers: (row['PAPELES/VTV'] || '').toString().trim(),
+                        version: (row['VERSION'] || '').toString().trim(),
+                        year: (row['AÑO'] || row['ANO'] || '').toString().trim(),
+                        plate,
+                        km: (row['KM'] || '').toString().trim(),
+                        fuel: (row['NAFTA'] || '').toString().trim(),
+                        service: (row['SERVIS/DISTRIB'] || '').toString().trim(),
+                        transmission: (row['MAN/AT'] || '').toString().trim(),
+                        interior: (row['INTERIOR'] || '').toString().trim(),
+                        tires: (row['CUBIERTAS'] || '').toString().trim(),
+                        ac: (row['AIRE ACOND.'] || '').toString().trim(),
+                        collision: (row['CHOQUE'] || '').toString().trim(),
+                        sellReason: (row['XQ LO VENDES?'] || '').toString().trim(),
+                        price: normalizeMoney(row['PRECIO']),
+                        notes: (row['NOTAS'] || '').toString().trim(),
+                        status: 'para_ver',
+                        createdAt: now,
+                        updatedAt: now
+                    });
+                });
 
                 if (!items.length) return;
                 if (!firebaseEnabled) {
@@ -1078,34 +1108,46 @@
                         await addDoc(getCollectionRef(currentUser.uid, 'autos'), payload);
                     }
                 }
+                if (skipped) showToast(`Se omitieron ${skipped} fila(s) en ${sheetName} por patente repetida.`, 'error');
             }
 
             if (sheetName === 'STOCK') {
                 const headerIndex = findHeaderRow(rows, ['AUTO', 'NOMBRE']);
                 if (headerIndex < 0) return;
-                const items = rowsToObjects(rows, headerIndex).map((row) => ({
-                    id: makeId('auto'),
-                    uniqueCode: (row['NOMBRE'] || '').toString().trim() || makeId('auto'),
-                    autoName: (row['AUTO'] || '').toString().trim(),
-                    ownerName: (row['NOMBRE'] || '').toString().trim(),
-                    stockDate: normalizeDate(row['Fecha Ingreso']),
-                    plate: (row['PATENTE'] || '').toString().trim(),
-                    location: (row['UBICACIÓN'] || row['UBICACION'] || '').toString().trim(),
-                    content: (row['CONTENIDO'] || '').toString().trim(),
-                    networks: (row['REDES'] || '').toString().trim(),
-                    clientPrice: normalizeMoney(row['PRECIO CLIENTE']),
-                    myPrice: normalizeMoney(row['MI PRECIO']),
-                    fines: (row['MULTAS?'] || '').toString().trim(),
-                    plateDebt: (row['DEUDA PATEN'] || '').toString().trim(),
-                    suats: (row['SUATS'] || '').toString().trim(),
-                    lowPrice: normalizeMoney(row['PRECIO + BAJO']),
-                    domainInfo: (row['Inf. Dominio'] || '').toString().trim(),
-                    readyTransfer: (row['Listo p/Transferir?'] || '').toString().trim(),
-                    stockNotes: (row['NOTAS'] || '').toString().trim(),
-                    status: 'stock',
-                    createdAt: now,
-                    updatedAt: now
-                }));
+                const existingPlates = new Set(autos.map(a => normalizePlate(a.plate)).filter(Boolean));
+                const items = [];
+                let skipped = 0;
+                rowsToObjects(rows, headerIndex).forEach((row) => {
+                    const plate = normalizePlate(row['PATENTE']);
+                    if (plate && existingPlates.has(plate)) {
+                        skipped += 1;
+                        return;
+                    }
+                    if (plate) existingPlates.add(plate);
+                    items.push({
+                        id: makeId('auto'),
+                        uniqueCode: (row['NOMBRE'] || '').toString().trim() || makeId('auto'),
+                        autoName: (row['AUTO'] || '').toString().trim(),
+                        ownerName: (row['NOMBRE'] || '').toString().trim(),
+                        stockDate: normalizeDate(row['Fecha Ingreso']),
+                        plate,
+                        location: (row['UBICACIÓN'] || row['UBICACION'] || '').toString().trim(),
+                        content: (row['CONTENIDO'] || '').toString().trim(),
+                        networks: (row['REDES'] || '').toString().trim(),
+                        clientPrice: normalizeMoney(row['PRECIO CLIENTE']),
+                        myPrice: normalizeMoney(row['MI PRECIO']),
+                        fines: (row['MULTAS?'] || '').toString().trim(),
+                        plateDebt: (row['DEUDA PATEN'] || '').toString().trim(),
+                        suats: (row['SUATS'] || '').toString().trim(),
+                        lowPrice: normalizeMoney(row['PRECIO + BAJO']),
+                        domainInfo: (row['Inf. Dominio'] || '').toString().trim(),
+                        readyTransfer: (row['Listo p/Transferir?'] || '').toString().trim(),
+                        stockNotes: (row['NOTAS'] || '').toString().trim(),
+                        status: 'stock',
+                        createdAt: now,
+                        updatedAt: now
+                    });
+                });
 
                 if (!items.length) return;
                 if (!firebaseEnabled) {
@@ -1117,6 +1159,7 @@
                         await addDoc(getCollectionRef(currentUser.uid, 'autos'), payload);
                     }
                 }
+                if (skipped) showToast(`Se omitieron ${skipped} fila(s) en ${sheetName} por patente repetida.`, 'error');
             }
 
             if (sheetName === 'BUSCAR') {
@@ -1389,12 +1432,18 @@
                 uniqueCode,
                 autoName: (formData.get('autoName') || '').toString().trim(),
                 ownerName: (formData.get('ownerName') || '').toString().trim(),
+                plate: normalizePlate(formData.get('plate')),
                 price: normalizeNumber(formData.get('price')),
                 status,
                 location: (formData.get('location') || '').toString().trim(),
                 notes: (formData.get('notes') || '').toString().trim(),
                 updatedAt: now
             };
+
+            if (isPlateDuplicate(payload.plate)) {
+                showToast('Ya existe un auto con esa patente.', 'error');
+                return;
+            }
 
             if (!firebaseEnabled) {
                 autos.unshift({ id: makeId('auto'), createdAt: now, ...payload });
@@ -1522,7 +1571,7 @@
                     <div class="flex gap-3 flex-wrap">
                         <input type="text" id="kanban-search" placeholder="Buscar por auto, cliente, patente..." class="w-64 p-2 border rounded-lg shadow-sm">
                         <button onclick="openQuickAutoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo Auto</button>
-                        <button onclick="openNewAutoForm()" class="bg-white text-blue-700 border border-blue-200 px-4 py-2 rounded-lg font-semibold">Detalles</button>
+                        <button onclick="openNewAutoForm()" class="bg-white text-blue-700 border border-blue-200 px-4 py-2 rounded-lg font-semibold">Formulario completo</button>
                         <button onclick="importExcelDemo()" class="bg-gray-900 text-white px-4 py-2 rounded-lg font-semibold">Importar Excel</button>
                         <button onclick="importDemoData()" class="bg-white text-gray-900 border border-gray-200 px-4 py-2 rounded-lg font-semibold">Importar demo</button>
                         <button onclick="openExcelHelp()" class="bg-white text-gray-900 border border-gray-200 px-3 py-2 rounded-lg font-semibold">Ayuda Excel</button>
@@ -1907,6 +1956,7 @@
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <input type="text" name="autoName" list="auto-name-list" placeholder="Auto" required class="w-full p-2 border rounded">
                         <input type="text" name="ownerName" list="owner-name-list" placeholder="Nombre cliente" class="w-full p-2 border rounded">
+                        <input type="text" name="plate" placeholder="Patente" required class="w-full p-2 border rounded">
                         <input type="number" name="price" placeholder="Precio" class="w-full p-2 border rounded">
                         <select name="status" class="w-full p-2 border rounded">
                             <option value="para_ver">Para ir a ver</option>

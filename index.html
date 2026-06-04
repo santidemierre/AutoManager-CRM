@@ -68,7 +68,7 @@
             { value: 'fui_ver', label: 'Fui a ver' },
             { value: 'no_va', label: 'No va' },
             { value: 'comuni', label: 'Comuni / Ofrecimiento' },
-            { value: 'vendido', label: 'Se vendio' },
+            { value: 'vendido', label: 'Se vendió' },
             { value: 'stock', label: 'Stock' }
         ];
 
@@ -169,6 +169,7 @@
             const views = {
                 kanban: document.getElementById('view-kanban'),
                 autos: document.getElementById('view-autos'),
+                clientes: document.getElementById('view-clientes'),
                 senados: document.getElementById('view-senados'),
                 ventas: document.getElementById('view-ventas'),
                 pedidos: document.getElementById('view-pedidos'),
@@ -254,11 +255,11 @@
 
             if (emailEl && !emailEl.checkValidity()) {
                 emailEl.reportValidity?.();
-                if (msg) msg.textContent = 'Ingresa un email valido.';
+                if (msg) msg.textContent = 'Ingresa un email válido.';
                 return;
             }
             if (!password) {
-                if (msg) msg.textContent = 'Ingresa tu contrasena.';
+                if (msg) msg.textContent = 'Ingresa tu contraseña.';
                 return;
             }
             try {
@@ -279,15 +280,15 @@
 
             if (emailEl && !emailEl.checkValidity()) {
                 emailEl.reportValidity?.();
-                if (msg) msg.textContent = 'Ingresa un email valido.';
+                if (msg) msg.textContent = 'Ingresa un email válido.';
                 return;
             }
             if (!password) {
-                if (msg) msg.textContent = 'Ingresa una contrasena.';
+                if (msg) msg.textContent = 'Ingresa una contraseña.';
                 return;
             }
             if (password.length < 6) {
-                if (msg) msg.textContent = 'La contrasena debe tener al menos 6 caracteres.';
+                if (msg) msg.textContent = 'La contraseña debe tener al menos 6 caracteres.';
                 return;
             }
             try {
@@ -305,12 +306,12 @@
             if (msg) msg.textContent = '';
             if (emailEl && !emailEl.checkValidity()) {
                 emailEl.reportValidity?.();
-                if (msg) msg.textContent = 'Ingresa un email valido.';
+                if (msg) msg.textContent = 'Ingresa un email válido.';
                 return;
             }
             try {
                 await sendPasswordResetEmail(auth, email);
-                if (msg) msg.textContent = 'Te enviamos un email para restablecer la contrasena.';
+                if (msg) msg.textContent = 'Te enviamos un email para restablecer la contraseña.';
             } catch (err) {
                 if (msg) msg.textContent = err?.message || 'Error al enviar email de recuperacion';
             }
@@ -343,6 +344,45 @@
             return STATUS_OPTIONS.find(o => o.value === value)?.label || value || 'Sin estado';
         }
 
+        function getStatusBadgeClass(status) {
+            if (status === 'no_va') return 'bg-red-100 text-red-700';
+            if (status === 'vendido') return 'bg-emerald-100 text-emerald-700';
+            return 'bg-blue-50 text-blue-700';
+        }
+
+        function getClientKey(name) {
+            return (name || '').toString().trim().toLowerCase();
+        }
+
+        function hasSenadoForAuto(auto) {
+            if (!auto) return false;
+            const autoId = (auto.id || '').toString().trim();
+            const autoName = (auto.autoName || '').toString().trim().toLowerCase();
+            return senados.some((s) => {
+                if (autoId && (s.autoId || '').toString().trim() === autoId) return true;
+                if (!autoName) return false;
+                return (s.auto || '').toString().trim().toLowerCase() === autoName;
+            });
+        }
+
+        function getSenadosForAuto(auto) {
+            if (!auto) return [];
+            const autoId = (auto.id || '').toString().trim();
+            const autoName = (auto.autoName || '').toString().trim().toLowerCase();
+            return senados.filter((s) => {
+                if (autoId && (s.autoId || '').toString().trim() === autoId) return true;
+                if (!autoName) return false;
+                return (s.auto || '').toString().trim().toLowerCase() === autoName;
+            });
+        }
+
+        function findAutoIdByName(name) {
+            const key = (name || '').toString().trim().toLowerCase();
+            if (!key) return '';
+            const match = autos.find(a => (a.autoName || '').toString().trim().toLowerCase() === key);
+            return match?.id || '';
+        }
+
         function getAutoById(id) {
             return autos.find(a => a.id === id);
         }
@@ -358,6 +398,11 @@
             if (!id) return;
             const nextStatus = (status || '').toString().trim();
             if (!nextStatus) return;
+            const auto = getAutoById(id);
+            if (nextStatus === 'no_va' && hasSenadoForAuto(auto)) {
+                showToast('Este auto está señado. No se puede pasar a "No va".', 'error');
+                return;
+            }
             const now = new Date().toISOString();
 
             if (!firebaseEnabled) {
@@ -417,6 +462,12 @@
                 updatedAt: now
             };
 
+            const candidateAuto = autoId ? getAutoById(autoId) : { id: autoId, autoName: payload.autoName };
+            if (payload.status === 'no_va' && hasSenadoForAuto(candidateAuto)) {
+                showToast('Este auto está señado. No se puede pasar a "No va".', 'error');
+                return;
+            }
+
             if (!firebaseEnabled) {
                 if (autoId) {
                     const idx = autos.findIndex(a => a.id === autoId);
@@ -441,6 +492,31 @@
             if (!currentUser) return;
             const id = (autoId || '').toString().trim();
             if (!id) return;
+            const auto = getAutoById(id);
+            const linkedSenados = getSenadosForAuto(auto);
+            if (linkedSenados.length) {
+                const reason = window.prompt('Este auto está señado. ¿Por qué se cayó el cliente?');
+                if (!reason || !reason.trim()) {
+                    showToast('Necesitás indicar el motivo para eliminar este auto.', 'error');
+                    return;
+                }
+                const trimmed = reason.trim();
+                if (!firebaseEnabled) {
+                    senados = senados.map((s) => {
+                        const shouldUpdate = linkedSenados.some(ls => ls.id === s.id);
+                        if (!shouldUpdate) return s;
+                        return { ...s, caidaMotivo: trimmed, caidaAt: new Date().toISOString() };
+                    });
+                    saveLocalState();
+                } else {
+                    for (const s of linkedSenados) {
+                        await updateDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'senados', s.id), {
+                            caidaMotivo: trimmed,
+                            caidaAt: new Date().toISOString()
+                        });
+                    }
+                }
+            }
             const ok = window.confirm('Eliminar este auto?');
             if (!ok) return;
             if (!firebaseEnabled) {
@@ -461,6 +537,10 @@
                     const rowId = (formData.get('rowId') || '').toString().trim();
                     const payload = Object.fromEntries(formData.entries());
                     delete payload.rowId;
+                    if (name === 'senados') {
+                        const autoId = findAutoIdByName(payload.auto);
+                        payload.autoId = autoId || '';
+                    }
                     const now = new Date().toISOString();
                     payload.updatedAt = now;
                     if (!firebaseEnabled) {
@@ -631,11 +711,14 @@
                             <div class="text-lg font-bold">${escapeHtml(a.autoName || 'Sin modelo')}</div>
                             <div class="text-sm text-gray-600">${escapeHtml(a.year || '')} ${a.plate ? '• ' + escapeHtml(a.plate) : ''}</div>
                         </div>
-                        <span class="text-xs px-3 py-1 rounded-full bg-blue-50 text-blue-700 font-semibold">${escapeHtml(getStatusLabel(a.status))}</span>
+                        <div class="flex flex-col items-end gap-2">
+                            <span class="text-xs px-3 py-1 rounded-full font-semibold ${getStatusBadgeClass(a.status)}">${escapeHtml(getStatusLabel(a.status))}</span>
+                            ${hasSenadoForAuto(a) ? '<span class="text-[10px] px-2 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Señado</span>' : ''}
+                        </div>
                     </div>
                     <div class="mt-3 grid grid-cols-2 gap-2 text-sm">
                         <div>
-                            <div class="text-xs text-gray-500">Ubicacion</div>
+                            <div class="text-xs text-gray-500">Ubicación</div>
                             <div class="font-semibold">${escapeHtml(a.location || '-')}</div>
                         </div>
                         <div>
@@ -657,6 +740,55 @@
                     </div>
                 </div>
             `).join('');
+        }
+
+        function renderClientes() {
+            const container = document.getElementById('clientes-grid');
+            if (!container) return;
+            const searchVal = document.getElementById('cliente-search')?.value.toLowerCase() || '';
+            const grouped = new Map();
+
+            autos.forEach((a) => {
+                const rawName = (a.ownerName || a.uniqueCode || '').toString().trim();
+                if (!rawName) return;
+                const key = getClientKey(rawName);
+                if (!key) return;
+                if (!grouped.has(key)) {
+                    grouped.set(key, {
+                        name: rawName,
+                        total: 0,
+                        noVa: 0,
+                        vendido: 0,
+                        autos: []
+                    });
+                }
+                const entry = grouped.get(key);
+                entry.total += 1;
+                if (a.status === 'no_va') entry.noVa += 1;
+                if (a.status === 'vendido') entry.vendido += 1;
+                entry.autos.push(a);
+            });
+
+            const items = Array.from(grouped.values())
+                .filter((c) => !searchVal || c.name.toLowerCase().includes(searchVal))
+                .sort((a, b) => a.name.localeCompare(b.name));
+
+            container.innerHTML = items.length ? items.map((c) => {
+                const badges = [];
+                if (c.noVa) badges.push(`<span class="text-xs px-2 py-1 rounded-full bg-red-100 text-red-700 font-semibold">No va: ${c.noVa}</span>`);
+                if (c.vendido) badges.push(`<span class="text-xs px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 font-semibold">Vendido: ${c.vendido}</span>`);
+                badges.push(`<span class="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700 font-semibold">Autos: ${c.total}</span>`);
+
+                return `
+                    <div class="bg-white border rounded-2xl p-4 shadow-sm hover:shadow-md transition">
+                        <div class="flex items-center justify-between gap-3">
+                            <div class="text-lg font-bold">${escapeHtml(c.name)}</div>
+                            <div class="flex flex-wrap gap-2 justify-end">${badges.join('')}</div>
+                        </div>
+                        <div class="mt-3 text-sm text-gray-600">${c.autos.slice(0, 3).map(a => escapeHtml(a.autoName || 'Sin modelo')).join(' · ')}${c.autos.length > 3 ? ' · ...' : ''}</div>
+                    </div>
+                `;
+            }).join('') : `<div class="text-gray-500 text-sm">Sin clientes cargados.</div>`;
         }
 
         function renderKanban() {
@@ -701,6 +833,7 @@
                                     ` : ''}
                                     <div class="text-xs text-gray-500 font-bold mb-1">${escapeHtml(a.uniqueCode || 'AUTO')}</div>
                                     <div class="text-sm font-semibold">${escapeHtml(a.autoName || 'Sin modelo')}</div>
+                                    ${hasSenadoForAuto(a) ? '<div class="mt-1 inline-flex text-[10px] px-2 py-1 rounded-full bg-amber-100 text-amber-800 font-semibold">Señado</div>' : ''}
                                     <div class="text-xs text-gray-500">${escapeHtml(a.year || '')} ${a.plate ? '• ' + escapeHtml(a.plate) : ''}</div>
                                     <div class="mt-2 text-xs text-gray-600">$${(a.price || 0).toLocaleString()}</div>
                                 </div>
@@ -725,7 +858,7 @@
         }
 
         function renderSenados() {
-            renderTable(senados, 'senados-table-body', ['auto', 'precioVenta', 'patente', 'vendedor', 'senaTurno', 'diaTransfer', 'comprador'], 'Sin senas cargadas');
+            renderTable(senados, 'senados-table-body', ['auto', 'precioVenta', 'patente', 'vendedor', 'senaTurno', 'diaTransfer', 'comprador'], 'Sin señas cargadas');
         }
 
         function renderVentas() {
@@ -753,6 +886,7 @@
             refreshDatalists();
             if (activeView === 'kanban') renderKanban();
             if (activeView === 'autos') renderAutos();
+            if (activeView === 'clientes') renderClientes();
             if (activeView === 'senados') renderSenados();
             if (activeView === 'ventas') renderVentas();
             if (activeView === 'pedidos') renderPedidos();
@@ -1015,23 +1149,28 @@
             if (sheetName === 'SEÑADO') {
                 const headerIndex = findHeaderRow(rows, ['AUTO', 'PRECIO VENTA']);
                 if (headerIndex < 0) return;
-                const items = rowsToObjects(rows, headerIndex).map((row) => ({
-                    id: makeId('senado'),
-                    auto: (row['AUTO'] || '').toString().trim(),
-                    precioVenta: (row['PRECIO VENTA'] || '').toString().trim(),
-                    patente: (row['PATENTE'] || '').toString().trim(),
-                    vendedor: (row['VENDEDOR'] || row['VENDEDOR '] || '').toString().trim(),
-                    celularVendedor: (row['celular'] || '').toString().trim(),
-                    senaTurno: (row['SEÑA/TURNO'] || '').toString().trim(),
-                    diaTransfer: normalizeDate(row['DIA TRANSFE']),
-                    comprador: (row['COMPRADOR'] || '').toString().trim(),
-                    celularComprador: (row['celular_1'] || row['celular'] || '').toString().trim(),
-                    fechaDefinitiva: normalizeDate(row['FECHA DEFINITIVA']),
-                    ganancia: (row['GANANCIA'] || '').toString().trim(),
-                    propina: (row['Propina'] || '').toString().trim(),
-                    createdAt: now,
-                    updatedAt: now
-                }));
+                const items = rowsToObjects(rows, headerIndex).map((row) => {
+                    const autoName = (row['AUTO'] || '').toString().trim();
+                    const autoId = findAutoIdByName(autoName);
+                    return {
+                        id: makeId('senado'),
+                        auto: autoName,
+                        autoId,
+                        precioVenta: (row['PRECIO VENTA'] || '').toString().trim(),
+                        patente: (row['PATENTE'] || '').toString().trim(),
+                        vendedor: (row['VENDEDOR'] || row['VENDEDOR '] || '').toString().trim(),
+                        celularVendedor: (row['celular'] || '').toString().trim(),
+                        senaTurno: (row['SEÑA/TURNO'] || '').toString().trim(),
+                        diaTransfer: normalizeDate(row['DIA TRANSFE']),
+                        comprador: (row['COMPRADOR'] || '').toString().trim(),
+                        celularComprador: (row['celular_1'] || row['celular'] || '').toString().trim(),
+                        fechaDefinitiva: normalizeDate(row['FECHA DEFINITIVA']),
+                        ganancia: (row['GANANCIA'] || '').toString().trim(),
+                        propina: (row['Propina'] || '').toString().trim(),
+                        createdAt: now,
+                        updatedAt: now
+                    };
+                });
 
                 if (!items.length) return;
                 if (!firebaseEnabled) {
@@ -1147,7 +1286,7 @@
                         precioVenta: '9200000',
                         patente: 'AE987GH',
                         vendedor: 'Santi',
-                        senaTurno: 'Senado 300k',
+                        senaTurno: 'Seña 300k',
                         diaTransfer: '2026-05-23',
                         comprador: 'Lucas Diaz',
                         createdAt: now,
@@ -1208,7 +1347,7 @@
                 await appendItems('pedidos', demo.pedidos);
                 await appendItems('scanner', demo.scanner);
                 render();
-                showToast('Demo importada con exito.');
+                showToast('Demo importada con éxito.');
             } catch (error) {
                 console.error(error);
                 showToast('No se pudo importar la demo.', 'error');
@@ -1228,7 +1367,7 @@
                     await importSheetData(sheetName, rows);
                 }
                 render();
-                showToast('Excel importado con exito.');
+                showToast('Excel importado con éxito.');
             } catch (error) {
                 console.error(error);
                 showToast('No se pudo importar el Excel.', 'error');
@@ -1286,6 +1425,7 @@
             document.getElementById('auto-search')?.addEventListener('input', renderAutos);
             document.getElementById('auto-status-filter')?.addEventListener('change', renderAutos);
             document.getElementById('kanban-search')?.addEventListener('input', renderKanban);
+            document.getElementById('cliente-search')?.addEventListener('input', renderClientes);
         });
     </script>
     <style>
@@ -1298,7 +1438,7 @@
 <body class="bg-gray-50 text-gray-900 h-screen flex flex-col overflow-hidden">
     <header class="bg-blue-900 text-white p-4 shadow-lg flex justify-between items-center shrink-0">
         <div class="flex items-center gap-3">
-            <button onclick="openMobileMenu()" class="md:hidden bg-blue-950/40 hover:bg-blue-950/60 p-2 rounded-lg" aria-label="Abrir menu">
+            <button onclick="openMobileMenu()" class="md:hidden bg-blue-950/40 hover:bg-blue-950/60 p-2 rounded-lg" aria-label="Abrir menú">
                 <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
                 </svg>
@@ -1321,7 +1461,7 @@
         <div class="absolute inset-0 bg-black/20" onclick="closeQuickAddMenu()"></div>
         <div class="absolute right-4 top-20 bg-white rounded-xl shadow-lg border overflow-hidden w-60">
             <button onclick="quickAddAuto()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold">Nuevo Auto</button>
-            <button onclick="quickAddSenado()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Senado</button>
+            <button onclick="quickAddSenado()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Señado</button>
             <button onclick="quickAddVenta()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Venta externa</button>
             <button onclick="quickAddPedido()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Pedido</button>
             <button onclick="quickAddScanner()" class="w-full text-left px-4 py-3 hover:bg-gray-50 text-sm font-semibold border-t">Scanner</button>
@@ -1335,9 +1475,9 @@
             <div class="p-4 border-b border-blue-700 flex items-center justify-between">
                 <div class="flex items-center gap-2">
                     <div class="bg-white text-blue-900 p-2 rounded-lg font-black text-lg">AM</div>
-                    <div class="font-bold">Menu</div>
+                    <div class="font-bold">Menú</div>
                 </div>
-                <button onclick="closeMobileMenu()" class="text-blue-200 hover:text-white" aria-label="Cerrar menu">
+                <button onclick="closeMobileMenu()" class="text-blue-200 hover:text-white" aria-label="Cerrar menú">
                     <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -1346,7 +1486,8 @@
             <nav class="mt-4 flex-1 px-4 space-y-2">
                 <button data-view="kanban" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">Kanban</button>
                 <button data-view="autos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Inventario</button>
-                <button data-view="senados" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Senados</button>
+                <button data-view="clientes" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Clientes</button>
+                <button data-view="senados" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Señados</button>
                 <button data-view="ventas" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Ventas externas</button>
                 <button data-view="pedidos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Pedidos</button>
                 <button data-view="scanner" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Scanner</button>
@@ -1361,7 +1502,8 @@
             <nav class="mt-6 flex-1 px-4 space-y-2">
                 <button data-view="kanban" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition bg-blue-700">Kanban</button>
                 <button data-view="autos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Inventario</button>
-                <button data-view="senados" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Senados</button>
+                <button data-view="clientes" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Clientes</button>
+                <button data-view="senados" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Señados</button>
                 <button data-view="ventas" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Ventas externas</button>
                 <button data-view="pedidos" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Pedidos</button>
                 <button data-view="scanner" class="nav-link w-full text-left p-3 rounded-lg flex items-center gap-3 hover:bg-blue-700 transition">Scanner</button>
@@ -1393,7 +1535,7 @@
                 <div class="mb-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div>
                         <h2 class="text-2xl font-bold text-gray-800">Inventario de Autos</h2>
-                        <p class="text-gray-500 text-sm">Base unica con estado y detalles.</p>
+                        <p class="text-gray-500 text-sm">Base única con estado y detalles.</p>
                     </div>
                     <div class="flex gap-3">
                         <input type="text" id="auto-search" placeholder="Buscar por auto, cliente, patente..." class="w-64 p-2 border rounded-lg shadow-sm">
@@ -1403,7 +1545,7 @@
                             <option value="fui_ver">Fui a ver</option>
                             <option value="no_va">No va</option>
                             <option value="comuni">Comuni / Ofrecimiento</option>
-                            <option value="vendido">Se vendio</option>
+                                    <option value="vendido">Se vendió</option>
                             <option value="stock">Stock</option>
                         </select>
                     </div>
@@ -1411,11 +1553,24 @@
                 <div id="autos-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 overflow-y-auto custom-scroll pb-4"></div>
             </div>
 
+            <div id="view-clientes" class="hidden h-full flex flex-col">
+                <div class="mb-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-800">Clientes</h2>
+                        <p class="text-gray-500 text-sm">Listado único con búsqueda rápida.</p>
+                    </div>
+                    <div class="flex gap-3">
+                        <input type="text" id="cliente-search" placeholder="Buscar cliente..." class="w-64 p-2 border rounded-lg shadow-sm">
+                    </div>
+                </div>
+                <div id="clientes-grid" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 overflow-y-auto custom-scroll pb-4"></div>
+            </div>
+
             <div id="view-senados" class="hidden h-full flex flex-col">
                 <div class="mb-4 flex items-center justify-between">
                     <div>
-                        <h2 class="text-2xl font-bold text-gray-800">Senados</h2>
-                        <p class="text-gray-500 text-sm">Operaciones con sena y transferencia.</p>
+                        <h2 class="text-2xl font-bold text-gray-800">Señados</h2>
+                        <p class="text-gray-500 text-sm">Operaciones con seña y transferencia.</p>
                     </div>
                     <button onclick="openNewSenadoForm()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold">+ Nuevo</button>
                 </div>
@@ -1428,7 +1583,7 @@
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Precio venta</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Patente</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Vendedor</th>
-                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Sena</th>
+                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Seña</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Transferencia</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Comprador</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
@@ -1485,7 +1640,7 @@
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Nombre/Auto</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Presupuesto</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Auto</th>
-                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ubicacion</th>
+                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ubicación</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Precio bajo</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Notas</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
@@ -1514,7 +1669,7 @@
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Auto</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Cliente/Numero</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Tipo</th>
-                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ubicacion</th>
+                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ubicación</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Borre fallas</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Ganancias</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
@@ -1545,8 +1700,8 @@
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Fecha</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Tipo</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Monto</th>
-                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Categoria</th>
-                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Descripcion</th>
+                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Categoría</th>
+                                    <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Descripción</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase">Auto</th>
                                     <th class="p-3 text-xs font-semibold text-gray-600 uppercase text-right">Acciones</th>
                                 </tr>
@@ -1570,10 +1725,10 @@
                     <div class="rounded-xl border border-blue-100 bg-blue-50 p-4">
                         <div class="flex items-center justify-between mb-3">
                             <div>
-                                <div class="text-xs font-bold uppercase text-blue-500">Basico</div>
-                                <div class="text-sm text-blue-700">Carga rapida con lo minimo.</div>
+                                <div class="text-xs font-bold uppercase text-blue-500">Básico</div>
+                                <div class="text-sm text-blue-700">Carga rápida con lo mínimo.</div>
                             </div>
-                            <button type="button" onclick="openQuickAutoForm()" class="text-xs text-blue-700 hover:underline">Abrir version rapida</button>
+                            <button type="button" onclick="openQuickAutoForm()" class="text-xs text-blue-700 hover:underline">Abrir versión rápida</button>
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <div>
@@ -1602,12 +1757,12 @@
                                     <option value="fui_ver">Fui a ver</option>
                                     <option value="no_va">No va</option>
                                     <option value="comuni">Comuni / Ofrecimiento</option>
-                                    <option value="vendido">Se vendio</option>
+                                    <option value="vendido">Se vendió</option>
                                     <option value="stock">Stock</option>
                                 </select>
                             </div>
                             <div>
-                                <label class="block text-sm font-medium mb-1">Ubicacion</label>
+                                <label class="block text-sm font-medium mb-1">Ubicación</label>
                                 <input type="text" name="location" list="location-list" class="w-full p-2 border rounded">
                             </div>
                         </div>
@@ -1624,7 +1779,7 @@
                                 <input type="text" name="version" class="w-full p-2 border rounded">
                             </div>
                             <div>
-                                <label class="block text-sm font-medium mb-1">Ano</label>
+                                <label class="block text-sm font-medium mb-1">Año</label>
                                 <input type="text" name="year" class="w-full p-2 border rounded">
                             </div>
                             <div>
@@ -1670,7 +1825,7 @@
                         </div>
                         <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
                             <div>
-                                <label class="block text-sm font-medium mb-1">Por que lo vendes</label>
+                                <label class="block text-sm font-medium mb-1">Por qué lo vendés</label>
                                 <input type="text" name="sellReason" class="w-full p-2 border rounded">
                             </div>
                             <div>
@@ -1745,7 +1900,7 @@
     <div id="quick-auto-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
         <div class="bg-white rounded-2xl w-full max-w-lg overflow-hidden">
             <div class="p-6 border-b">
-                <h3 class="text-xl font-bold">Carga Rapida</h3>
+                <h3 class="text-xl font-bold">Carga Rápida</h3>
             </div>
             <div class="p-6">
                 <form id="quick-auto-form" onsubmit="saveQuickAuto(event)" class="space-y-4">
@@ -1758,7 +1913,7 @@
                             <option value="fui_ver">Fui a ver</option>
                             <option value="no_va">No va</option>
                             <option value="comuni">Comuni / Ofrecimiento</option>
-                            <option value="vendido">Se vendio</option>
+                            <option value="vendido">Se vendió</option>
                             <option value="stock">Stock</option>
                         </select>
                     </div>
@@ -1781,7 +1936,7 @@
                 <p class="text-gray-600">Hojas soportadas (nombre exacto) y columnas minimas:</p>
                 <ul class="list-disc pl-6 space-y-1">
                     <li><strong>GENERAL</strong>: AUTO, NOMBRE, PRECIO (y opcional: PATENTE, AÑO)</li>
-                    <li><strong>STOCK</strong>: AUTO, NOMBRE, Fecha Ingreso, UBICACION</li>
+                    <li><strong>STOCK</strong>: AUTO, NOMBRE, Fecha Ingreso, UBICACIÓN</li>
                     <li><strong>BUSCAR</strong>: NOMBRE-AUTO, PRESUPUESTO</li>
                     <li><strong>SEÑADO</strong>: AUTO, PRECIO VENTA, PATENTE</li>
                     <li><strong>VENTA X AFUERA</strong>: CLIENTE, PRESUPUESTO</li>
@@ -1802,7 +1957,7 @@
     <div id="senados-modal" class="fixed inset-0 bg-black/50 hidden flex items-center justify-center z-50 p-4">
         <div class="bg-white rounded-2xl w-full max-w-xl overflow-hidden">
             <div class="p-6 border-b">
-                <h3 class="text-xl font-bold">Nuevo Senado</h3>
+                <h3 class="text-xl font-bold">Nuevo Señado</h3>
             </div>
             <div class="p-6">
                 <form id="senados-form" onsubmit="saveSenado(event)" class="space-y-4">
@@ -1813,8 +1968,8 @@
                         <input type="text" name="patente" placeholder="Patente" class="w-full p-2 border rounded">
                         <input type="text" name="vendedor" placeholder="Vendedor" class="w-full p-2 border rounded">
                         <input type="text" name="celularVendedor" placeholder="Celular vendedor" class="w-full p-2 border rounded">
-                        <input type="text" name="senaTurno" placeholder="Sena/Turno" class="w-full p-2 border rounded">
-                        <input type="date" name="diaTransfer" placeholder="Dia transferencia" class="w-full p-2 border rounded">
+                        <input type="text" name="senaTurno" placeholder="Seña/Turno" class="w-full p-2 border rounded">
+                        <input type="date" name="diaTransfer" placeholder="Día transferencia" class="w-full p-2 border rounded">
                         <input type="text" name="comprador" placeholder="Comprador" class="w-full p-2 border rounded">
                         <input type="text" name="celularComprador" placeholder="Celular comprador" class="w-full p-2 border rounded">
                         <input type="date" name="fechaDefinitiva" placeholder="Fecha definitiva" class="w-full p-2 border rounded">
@@ -1868,7 +2023,7 @@
                         <input type="text" name="nombreAuto" placeholder="Nombre/Auto" class="w-full p-2 border rounded">
                         <input type="text" name="presupuesto" placeholder="Presupuesto" class="w-full p-2 border rounded">
                         <input type="text" name="auto" placeholder="Auto" class="w-full p-2 border rounded">
-                        <input type="text" name="ubicacion" placeholder="Ubicacion" class="w-full p-2 border rounded">
+                        <input type="text" name="ubicacion" placeholder="Ubicación" class="w-full p-2 border rounded">
                         <input type="text" name="precioBajo" placeholder="Precio + bajo" class="w-full p-2 border rounded">
                         <input type="text" name="notas" placeholder="Notas" class="w-full p-2 border rounded">
                     </div>
@@ -1894,7 +2049,7 @@
                         <input type="text" name="auto" placeholder="Auto" class="w-full p-2 border rounded">
                         <input type="text" name="clienteNumero" placeholder="Cliente/Numero" class="w-full p-2 border rounded">
                         <input type="text" name="tipo" placeholder="Particular/Agencia" class="w-full p-2 border rounded">
-                        <input type="text" name="ubicacion" placeholder="Ubicacion" class="w-full p-2 border rounded">
+                        <input type="text" name="ubicacion" placeholder="Ubicación" class="w-full p-2 border rounded">
                         <input type="text" name="borreFallas" placeholder="Borre fallas?" class="w-full p-2 border rounded">
                         <input type="text" name="ganancias" placeholder="Ganancias" class="w-full p-2 border rounded">
                     </div>
@@ -1922,8 +2077,8 @@
                             <option value="gasto">Gasto</option>
                         </select>
                         <input type="text" name="monto" placeholder="Monto" class="w-full p-2 border rounded">
-                        <input type="text" name="categoria" placeholder="Categoria" class="w-full p-2 border rounded">
-                        <input type="text" name="descripcion" placeholder="Descripcion" class="w-full p-2 border rounded">
+                        <input type="text" name="categoria" placeholder="Categoría" class="w-full p-2 border rounded">
+                        <input type="text" name="descripcion" placeholder="Descripción" class="w-full p-2 border rounded">
                         <input type="text" name="auto" placeholder="Auto (opcional)" class="w-full p-2 border rounded">
                     </div>
                     <div class="flex justify-end gap-2 pt-4">
@@ -1948,12 +2103,12 @@
                         <input id="auth-email" type="email" class="w-full p-2 border rounded" placeholder="tu@email.com" required />
                     </div>
                     <div>
-                        <label class="block text-sm font-medium mb-1">Contrasena</label>
+                        <label class="block text-sm font-medium mb-1">Contraseña</label>
                         <input id="auth-password" type="password" class="w-full p-2 border rounded" placeholder="********" required />
                     </div>
                     <div id="auth-message" class="text-sm text-red-600"></div>
                     <div class="flex items-center justify-between gap-2 pt-2">
-                        <button type="button" onclick="authResetPassword()" class="text-sm text-blue-600 hover:underline">Olvide mi contrasena</button>
+                        <button type="button" onclick="authResetPassword()" class="text-sm text-blue-600 hover:underline">Olvidé mi contraseña</button>
                         <div class="flex gap-2">
                             <button type="button" onclick="authSignup()" class="px-4 py-2 bg-gray-800 text-white rounded-lg font-bold">Crear cuenta</button>
                             <button type="submit" class="px-4 py-2 bg-blue-600 text-white rounded-lg font-bold">Ingresar</button>

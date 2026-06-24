@@ -8,7 +8,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import * as XLSX from "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/+esm";
 
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'auto-manager-crm';
@@ -62,6 +62,7 @@
         let scanner = [];
         let movimientos = [];
         let unsubscribers = [];
+        let legacyMigrationInProgress = false;
 
         const STATUS_OPTIONS = [
             { value: 'para_ver', label: 'Para ir a ver' },
@@ -1055,6 +1056,180 @@
             return normalizeNumber(cleaned);
         }
 
+        function normalizeLegacyText(value) {
+            return (value || '').toString().trim().toLowerCase();
+        }
+
+        function mapLegacyStatusToNew(status) {
+            const s = normalizeLegacyText(status);
+            if (!s) return 'para_ver';
+            if (s.includes('vend') || s.includes('cerrad') || s.includes('ok')) return 'vendido';
+            if (s.includes('stock')) return 'stock';
+            if (s.includes('no') && (s.includes('va') || s.includes('avance') || s.includes('interes'))) return 'no_va';
+            if (s.includes('ofert') || s.includes('comun') || s.includes('contact')) return 'comuni';
+            if (s.includes('fui') || s.includes('visit') || s.includes('ver')) return 'fui_ver';
+            return 'para_ver';
+        }
+
+        function legacyAutoFingerprint(item) {
+            const auto = normalizeLegacyText(item.autoName);
+            const owner = normalizeLegacyText(item.ownerName);
+            const plate = normalizePlate(item.plate || '');
+            return [auto, owner, plate].join('|');
+        }
+
+        function legacyMovimientoFingerprint(item) {
+            const fecha = (item.fecha || '').toString().trim();
+            const tipo = normalizeLegacyText(item.tipo);
+            const monto = normalizeNumber(item.monto);
+            const categoria = normalizeLegacyText(item.categoria);
+            const descripcion = normalizeLegacyText(item.descripcion);
+            const auto = normalizeLegacyText(item.auto);
+            return [fecha, tipo, monto.toFixed(2), categoria, descripcion, auto].join('|');
+        }
+
+        function mapLegacyDealToAuto(deal, nowIso) {
+            const clientName = (deal.clientName || '').toString().trim();
+            const clientEmail = (deal.clientEmail || '').toString().trim();
+            const carModel = (deal.carModel || '').toString().trim();
+            const carYear = (deal.carYear || '').toString().trim();
+            const location = (deal.location || '').toString().trim();
+            const notes = (deal.notes || '').toString().trim();
+            const reminder = (deal.reminder || '').toString().trim();
+            if (!carModel && !clientName && !clientEmail) return null;
+
+            const joinedNotes = [notes, reminder].filter(Boolean).join(' | ');
+            return {
+                id: makeId('auto'),
+                uniqueCode: clientName || clientEmail || makeId('auto'),
+                autoName: carModel,
+                ownerName: clientName,
+                year: carYear,
+                location,
+                price: normalizeNumber(deal.price),
+                status: mapLegacyStatusToNew(deal.status),
+                notes: joinedNotes,
+                createdAt: (deal.createdAt || nowIso).toString(),
+                updatedAt: (deal.updatedAt || nowIso).toString()
+            };
+        }
+
+        function mapLegacyTransactionToMovimiento(trans, dealsById, nowIso) {
+            const type = normalizeLegacyText(trans.type) === 'income' ? 'ingreso' : 'gasto';
+            const amount = normalizeNumber(trans.amount);
+            const category = (trans.category || '').toString().trim();
+            const description = (trans.description || '').toString().trim();
+            const dealId = (trans.dealId || '').toString().trim();
+            const linkedDeal = dealId ? dealsById.get(dealId) : null;
+            const autoName = (linkedDeal?.carModel || '').toString().trim();
+            const ownerName = (linkedDeal?.clientName || '').toString().trim();
+            const finalDescription = [description, ownerName ? `Cliente: ${ownerName}` : ''].filter(Boolean).join(' | ');
+
+            return {
+                id: makeId('mov'),
+                fecha: normalizeDate(trans.date || trans.createdAt || nowIso),
+                tipo: type,
+                monto: amount,
+                categoria: category || (type === 'ingreso' ? 'Ingreso legacy' : 'Gasto legacy'),
+                descripcion: finalDescription,
+                auto: autoName,
+                createdAt: (trans.createdAt || nowIso).toString(),
+                updatedAt: (trans.updatedAt || nowIso).toString()
+            };
+        }
+
+        async function getLegacyDocsForCurrentUser() {
+            if (!currentUser) return { deals: [], transactions: [] };
+            if (!firebaseEnabled) {
+                return {
+                    deals: safeJsonParse(localStorage.getItem(localKey('deals')) || '[]', []),
+                    transactions: safeJsonParse(localStorage.getItem(localKey('transactions')) || '[]', [])
+                };
+            }
+
+            const dealsSnap = await getDocs(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'deals'));
+            const transSnap = await getDocs(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions'));
+            return {
+                deals: dealsSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
+                transactions: transSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
+            };
+        }
+
+        window.migrateLegacyData = async () => {
+            if (!currentUser && firebaseEnabled) return;
+            if (legacyMigrationInProgress) {
+                showToast('La migración ya está en curso.', 'error');
+                return;
+            }
+
+            const ok = window.confirm('Esto migrará datos legacy (deals/transactions) al modelo nuevo (autos/movimientos). ¿Continuar?');
+            if (!ok) return;
+
+            legacyMigrationInProgress = true;
+            try {
+                const now = new Date().toISOString();
+                const legacy = await getLegacyDocsForCurrentUser();
+                const legacyDeals = Array.isArray(legacy.deals) ? legacy.deals : [];
+                const legacyTransactions = Array.isArray(legacy.transactions) ? legacy.transactions : [];
+
+                if (!legacyDeals.length && !legacyTransactions.length) {
+                    showToast('No se encontraron datos legacy para migrar.', 'error');
+                    return;
+                }
+
+                const existingAutos = new Set(autos.map(legacyAutoFingerprint));
+                const existingMovimientos = new Set(movimientos.map(legacyMovimientoFingerprint));
+                const dealsById = new Map(legacyDeals.map((d) => [d.id, d]));
+
+                const autosToCreate = [];
+                legacyDeals.forEach((deal) => {
+                    const mapped = mapLegacyDealToAuto(deal, now);
+                    if (!mapped) return;
+                    const fp = legacyAutoFingerprint(mapped);
+                    if (existingAutos.has(fp)) return;
+                    existingAutos.add(fp);
+                    autosToCreate.push(mapped);
+                });
+
+                const movimientosToCreate = [];
+                legacyTransactions.forEach((trans) => {
+                    const mapped = mapLegacyTransactionToMovimiento(trans, dealsById, now);
+                    const fp = legacyMovimientoFingerprint(mapped);
+                    if (existingMovimientos.has(fp)) return;
+                    existingMovimientos.add(fp);
+                    movimientosToCreate.push(mapped);
+                });
+
+                if (!autosToCreate.length && !movimientosToCreate.length) {
+                    showToast('No había datos nuevos para migrar (ya estaban cargados).');
+                    return;
+                }
+
+                if (!firebaseEnabled) {
+                    autos = [...autosToCreate, ...autos];
+                    movimientos = [...movimientosToCreate, ...movimientos];
+                    saveLocalState();
+                    render();
+                } else {
+                    for (const item of autosToCreate) {
+                        const { id, ...payload } = item;
+                        await addDoc(getCollectionRef(currentUser.uid, 'autos'), payload);
+                    }
+                    for (const item of movimientosToCreate) {
+                        const { id, ...payload } = item;
+                        await addDoc(getCollectionRef(currentUser.uid, 'movimientos'), payload);
+                    }
+                }
+
+                showToast(`Migración lista: ${autosToCreate.length} autos y ${movimientosToCreate.length} movimientos.`);
+            } catch (error) {
+                console.error(error);
+                showToast('No se pudo completar la migración legacy.', 'error');
+            } finally {
+                legacyMigrationInProgress = false;
+            }
+        };
+
         function showToast(message, type = 'success') {
             const container = document.getElementById('toast-container');
             if (!container) return;
@@ -1603,6 +1778,7 @@
                         <button onclick="openNewAutoForm()" class="bg-white text-blue-700 border border-blue-200 px-4 py-2 rounded-lg font-semibold">Formulario completo</button>
                         <button onclick="importExcelDemo()" class="bg-gray-900 text-white px-4 py-2 rounded-lg font-semibold">Importar Excel</button>
                         <button onclick="importDemoData()" class="bg-white text-gray-900 border border-gray-200 px-4 py-2 rounded-lg font-semibold">Importar demo</button>
+                        <button onclick="migrateLegacyData()" class="bg-amber-100 text-amber-900 border border-amber-300 px-4 py-2 rounded-lg font-semibold">Migrar legacy</button>
                         <button onclick="openExcelHelp()" class="bg-white text-gray-900 border border-gray-200 px-3 py-2 rounded-lg font-semibold">Ayuda Excel</button>
                     </div>
                 </div>

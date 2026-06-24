@@ -1046,6 +1046,13 @@
         function normalizeDate(value) {
             if (!value) return '';
             if (value instanceof Date) return value.toISOString().slice(0, 10);
+            if (typeof value === 'object' && value && typeof value.toDate === 'function') {
+                try {
+                    return value.toDate().toISOString().slice(0, 10);
+                } catch {
+                    // ignore and continue with string fallback
+                }
+            }
             const asString = value.toString().trim();
             return asString;
         }
@@ -1054,6 +1061,15 @@
             if (typeof value === 'number') return value;
             const cleaned = (value || '').toString().replace(/[^0-9.]/g, '');
             return normalizeNumber(cleaned);
+        }
+
+        function formatErrorShort(error) {
+            const code = (error?.code || '').toString().trim();
+            const message = (error?.message || '').toString().trim();
+            if (code && message) return `${code}: ${message}`;
+            if (code) return code;
+            if (message) return message;
+            return 'error-desconocido';
         }
 
         function normalizeLegacyText(value) {
@@ -1138,21 +1154,51 @@
             };
         }
 
+        function getLegacyLocalState() {
+            return {
+                deals: safeJsonParse(localStorage.getItem(localKey('deals')) || '[]', []),
+                transactions: safeJsonParse(localStorage.getItem(localKey('transactions')) || '[]', [])
+            };
+        }
+
         async function getLegacyDocsForCurrentUser() {
-            if (!currentUser) return { deals: [], transactions: [] };
+            if (!currentUser) return { deals: [], transactions: [], warnings: [] };
+
+            const localLegacy = getLegacyLocalState();
             if (!firebaseEnabled) {
                 return {
-                    deals: safeJsonParse(localStorage.getItem(localKey('deals')) || '[]', []),
-                    transactions: safeJsonParse(localStorage.getItem(localKey('transactions')) || '[]', [])
+                    deals: localLegacy.deals,
+                    transactions: localLegacy.transactions,
+                    warnings: []
                 };
             }
 
-            const dealsSnap = await getDocs(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'deals'));
-            const transSnap = await getDocs(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions'));
-            return {
-                deals: dealsSnap.docs.map((d) => ({ id: d.id, ...d.data() })),
-                transactions: transSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
-            };
+            const warnings = [];
+            let deals = [];
+            let transactions = [];
+
+            try {
+                const dealsSnap = await getDocs(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'deals'));
+                deals = dealsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+            } catch (error) {
+                const code = (error?.code || '').toString();
+                warnings.push(code || 'firestore-deals-read-failed');
+                console.warn('No se pudieron leer deals legacy de Firestore.', error);
+            }
+
+            try {
+                const transSnap = await getDocs(collection(db, 'artifacts', appId, 'users', currentUser.uid, 'transactions'));
+                transactions = transSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+            } catch (error) {
+                const code = (error?.code || '').toString();
+                warnings.push(code || 'firestore-transactions-read-failed');
+                console.warn('No se pudieron leer transactions legacy de Firestore.', error);
+            }
+
+            if (!deals.length && localLegacy.deals.length) deals = localLegacy.deals;
+            if (!transactions.length && localLegacy.transactions.length) transactions = localLegacy.transactions;
+
+            return { deals, transactions, warnings };
         }
 
         window.migrateLegacyData = async () => {
@@ -1171,9 +1217,14 @@
                 const legacy = await getLegacyDocsForCurrentUser();
                 const legacyDeals = Array.isArray(legacy.deals) ? legacy.deals : [];
                 const legacyTransactions = Array.isArray(legacy.transactions) ? legacy.transactions : [];
+                const warnings = Array.isArray(legacy.warnings) ? legacy.warnings : [];
 
                 if (!legacyDeals.length && !legacyTransactions.length) {
-                    showToast('No se encontraron datos legacy para migrar.', 'error');
+                    if (warnings.some((w) => w.includes('permission-denied'))) {
+                        showToast('Sin acceso a colecciones legacy en Firestore. Revisar reglas o usar mismo usuario de la versión anterior.', 'error');
+                    } else {
+                        showToast('No se encontraron datos legacy para migrar.', 'error');
+                    }
                     return;
                 }
 
@@ -1211,20 +1262,52 @@
                     saveLocalState();
                     render();
                 } else {
+                    let autosCreated = 0;
+                    let movsCreated = 0;
+                    const failedWrites = [];
+
                     for (const item of autosToCreate) {
-                        const { id, ...payload } = item;
-                        await addDoc(getCollectionRef(currentUser.uid, 'autos'), payload);
+                        try {
+                            const { id, ...payload } = item;
+                            await addDoc(getCollectionRef(currentUser.uid, 'autos'), payload);
+                            autosCreated += 1;
+                        } catch (error) {
+                            failedWrites.push({ collection: 'autos', error: formatErrorShort(error) });
+                        }
                     }
                     for (const item of movimientosToCreate) {
-                        const { id, ...payload } = item;
-                        await addDoc(getCollectionRef(currentUser.uid, 'movimientos'), payload);
+                        try {
+                            const { id, ...payload } = item;
+                            await addDoc(getCollectionRef(currentUser.uid, 'movimientos'), payload);
+                            movsCreated += 1;
+                        } catch (error) {
+                            failedWrites.push({ collection: 'movimientos', error: formatErrorShort(error) });
+                        }
                     }
+
+                    if (failedWrites.length) {
+                        const firstError = failedWrites[0];
+                        const doneSummary = `Migración parcial: ${autosCreated}/${autosToCreate.length} autos y ${movsCreated}/${movimientosToCreate.length} movimientos.`;
+                        const errorSummary = ` Error en ${firstError.collection}: ${firstError.error}`;
+                        showToast(`${doneSummary}${errorSummary}`, 'error');
+                        return;
+                    }
+                }
+
+                if (warnings.some((w) => w.includes('permission-denied'))) {
+                    showToast(`Migración parcial: ${autosToCreate.length} autos y ${movimientosToCreate.length} movimientos. Firestore legacy con permisos restringidos.`, 'error');
+                    return;
                 }
 
                 showToast(`Migración lista: ${autosToCreate.length} autos y ${movimientosToCreate.length} movimientos.`);
             } catch (error) {
                 console.error(error);
-                showToast('No se pudo completar la migración legacy.', 'error');
+                const code = (error?.code || '').toString();
+                if (code.includes('permission-denied')) {
+                    showToast('No se pudo migrar: permisos insuficientes en Firestore para leer legacy.', 'error');
+                } else {
+                    showToast(`No se pudo completar la migración legacy: ${formatErrorShort(error)}`, 'error');
+                }
             } finally {
                 legacyMigrationInProgress = false;
             }
